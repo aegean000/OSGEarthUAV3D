@@ -1,0 +1,15 @@
+<map name="MyProjectMap">
+    <options>
+        <cache driver="filesystem">
+            <path>D:/osgEarth_Cache</path>
+        </cache>
+    </options>
+
+    <image name="ReadyMap_Image" driver="tms">
+        <url>https://readymap.org/readymap/tiles/1.0.0/7/</url>
+    </image>
+
+    <elevation name="ReadyMap_Elevation" driver="tms">
+        <url>https://readymap.org/readymap/tiles/1.0.0/116/</url>
+    </elevation>
+</map>

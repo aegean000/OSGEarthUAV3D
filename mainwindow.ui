@@ -6,7 +6,7 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>800</width>
+    <width>972</width>
     <height>600</height>
    </rect>
   </property>
@@ -35,43 +35,17 @@
       <property name="frameShadow">
        <enum>QFrame::Raised</enum>
       </property>
-      <widget class="QPushButton" name="btnTogglePlane">
-       <property name="geometry">
-        <rect>
-         <x>22</x>
-         <y>30</y>
-         <width>151</width>
-         <height>28</height>
-        </rect>
-       </property>
-       <property name="text">
-        <string>显示/隐藏飞机</string>
-       </property>
-      </widget>
       <widget class="QPushButton" name="btnResetView">
        <property name="geometry">
         <rect>
-         <x>22</x>
-         <y>100</y>
+         <x>20</x>
+         <y>40</y>
          <width>151</width>
          <height>28</height>
         </rect>
        </property>
        <property name="text">
         <string>复位视角</string>
-       </property>
-      </widget>
-      <widget class="QLabel" name="labelHeight">
-       <property name="geometry">
-        <rect>
-         <x>30</x>
-         <y>180</y>
-         <width>131</width>
-         <height>20</height>
-        </rect>
-       </property>
-       <property name="text">
-        <string>当前高度：0 m</string>
        </property>
       </widget>
       <widget class="QSlider" name="sliderProgress">
@@ -92,7 +66,7 @@
         <rect>
          <x>20</x>
          <y>300</y>
-         <width>111</width>
+         <width>161</width>
          <height>20</height>
         </rect>
        </property>
@@ -105,7 +79,7 @@
         <rect>
          <x>20</x>
          <y>350</y>
-         <width>91</width>
+         <width>151</width>
          <height>20</height>
         </rect>
        </property>
@@ -118,12 +92,94 @@
         <rect>
          <x>20</x>
          <y>400</y>
-         <width>141</width>
+         <width>171</width>
          <height>20</height>
         </rect>
        </property>
        <property name="text">
         <string>显示当前回放百分比</string>
+       </property>
+      </widget>
+      <widget class="QPushButton" name="btnImportData">
+       <property name="geometry">
+        <rect>
+         <x>20</x>
+         <y>0</y>
+         <width>151</width>
+         <height>28</height>
+        </rect>
+       </property>
+       <property name="text">
+        <string>导入航迹数据</string>
+       </property>
+      </widget>
+      <widget class="QPushButton" name="btnPlayPause">
+       <property name="geometry">
+        <rect>
+         <x>0</x>
+         <y>440</y>
+         <width>93</width>
+         <height>28</height>
+        </rect>
+       </property>
+       <property name="text">
+        <string>暂停</string>
+       </property>
+      </widget>
+      <widget class="QComboBox" name="comboBox">
+       <property name="geometry">
+        <rect>
+         <x>110</x>
+         <y>440</y>
+         <width>83</width>
+         <height>25</height>
+        </rect>
+       </property>
+       <item>
+        <property name="text">
+         <string>1.0x</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>0.5x</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>2.0x</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>4.0x</string>
+        </property>
+       </item>
+      </widget>
+      <widget class="QPushButton" name="btnPitchUp">
+       <property name="geometry">
+        <rect>
+         <x>10</x>
+         <y>80</y>
+         <width>81</width>
+         <height>28</height>
+        </rect>
+       </property>
+       <property name="text">
+        <string>减小倾斜角</string>
+       </property>
+      </widget>
+      <widget class="QPushButton" name="btnPitchDown">
+       <property name="geometry">
+        <rect>
+         <x>102</x>
+         <y>80</y>
+         <width>81</width>
+         <height>28</height>
+        </rect>
+       </property>
+       <property name="text">
+        <string>增加倾斜角</string>
        </property>
       </widget>
      </widget>
@@ -138,7 +194,7 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>800</width>
+     <width>972</width>
      <height>25</height>
     </rect>
    </property>
