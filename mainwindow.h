@@ -42,6 +42,8 @@ private slots:
 
     void on_btnPitchDown_clicked();
 
+    void on_checkShowProjection_clicked(bool checked);
+
 private:
     Ui::MainWindow *ui;
 
@@ -54,6 +56,7 @@ private:
     // 投影线相关成员变量
     osg::ref_ptr<osg::Geometry> _projLineGeom;
     osg::ref_ptr<osg::Vec3Array> _projLineVertices;
+    osg::ref_ptr<osg::Geode> _projLineGeode;
 
     bool _isFollowing = false;
     QElapsedTimer _resetTimer;

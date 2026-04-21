@@ -130,34 +130,38 @@ void MainWindow::initProjectionLine(osg::Group* root) {
 
     _projLineGeom = new osg::Geometry();
     _projLineVertices = new osg::Vec3Array(2);
+
+    // ✅ 修正这里：使用下标访问，这是最通用的写法
     (*_projLineVertices)[0] = osg::Vec3(0,0,0);
     (*_projLineVertices)[1] = osg::Vec3(0,0,0);
 
-    _projLineGeom->setVertexArray(_projLineVertices);
+    _projLineGeom->setUseDisplayList(false);
+    _projLineGeom->setUseVertexBufferObjects(true);
+    _projLineGeom->setVertexArray(_projLineVertices.get());
 
     osg::ref_ptr<osg::Vec4Array> colors = new osg::Vec4Array();
-    colors->push_back(osg::Vec4(1.0f, 1.0f, 0.0f, 0.8f)); // 换成黄色，地面更醒目
-    _projLineGeom->setColorArray(colors, osg::Array::BIND_OVERALL);
-
+    colors->push_back(osg::Vec4(1.0f, 1.0f, 0.0f, 1.0f));
+    _projLineGeom->setColorArray(colors.get(), osg::Array::BIND_OVERALL);
     _projLineGeom->addPrimitiveSet(new osg::DrawArrays(GL_LINES, 0, 2));
 
-    osg::ref_ptr<osg::Geode> geode = new osg::Geode();
-    geode->addDrawable(_projLineGeom);
+    // ✅ 关键：一定要把这个 Geode 加入场景，并且只用这一个 Geode
+    _projLineGeode = new osg::Geode();
+    _projLineGeode->addDrawable(_projLineGeom.get());
+    _projLineGeode->setName("ProjectionLineNode");
 
-    osg::StateSet* ss = geode->getOrCreateStateSet();
+    osg::StateSet* ss = _projLineGeode->getOrCreateStateSet();
     ss->setMode(GL_LIGHTING, osg::StateAttribute::OFF | osg::StateAttribute::PROTECTED);
+    ss->setAttributeAndModes(new osg::LineWidth(3.0f), osg::StateAttribute::ON);
+    ss->setRenderBinDetails(100, "RenderBin");
+    ss->setMode(GL_DEPTH_TEST, osg::StateAttribute::ON);
 
-    // 开启虚线模式
-    ss->setMode(GL_LINE_STIPPLE, osg::StateAttribute::ON);
-    // osg::LineStipple* stipple = new osg::LineStipple(2, 0xAAAA); // 2倍宽度，0xAAAA是均匀虚线
-    // ss->setAttributeAndModes(stipple, osg::StateAttribute::ON);
-    ss->setAttributeAndModes(new osg::LineWidth(5.0f), osg::StateAttribute::ON); //实线
+    // ✅ 确保 root 添加的是成员变量 _projLineGeode
+    root->addChild(_projLineGeode.get());
 
-    // 解决 Z-fighting：让线“浮”在地图表面，防止闪烁
-    ss->setAttributeAndModes(new osg::PolygonOffset(-1.0f, -1.0f), osg::StateAttribute::ON);
-    ss->setRenderBinDetails(11, "RenderBin"); // 确保在地图(Bin 0)和航迹(Bin 1)之后渲染
-
-    root->addChild(geode);
+    if (ui->checkShowProjection) {
+        bool isDefaultChecked = ui->checkShowProjection->isChecked();
+        _projLineGeode->setNodeMask(isDefaultChecked ? 0xffffffff : 0x0);
+    }
 }
 class TimeBasedMoveCallback : public osg::NodeCallback {
 public:
@@ -294,6 +298,7 @@ MainWindow::MainWindow(QWidget *parent)
     // ==============================================
     osg::ref_ptr<osg::Group> root = new osg::Group();
     root->addChild(this->_mapNode.get());
+    this->initProjectionLine(root.get());   // 初始化垂直投影线
     // 6. 绘制航线 (初始化空航线)
     if (config.showPath) {
         _pathGeom = new osg::Geometry(); // ✅ 赋值给成员变量
@@ -599,6 +604,12 @@ void MainWindow::on_btnImportData_clicked()
             manip->setViewpoint(osgEarth::Viewpoint("Import", firstPt.x(), firstPt.y(), 0, 0, -45, 20000), 2.0);
         }
     }
+    // 投影线切换
+    if (ui->checkShowProjection->isChecked()) {
+        _projLineGeode->setNodeMask(0xffffffff);
+    } else {
+        _projLineGeode->setNodeMask(0x0);
+    }
 
 }
 //动态刷新航迹
@@ -696,6 +707,20 @@ void MainWindow::on_btnPitchDown_clicked()
         vp.pitch() = osgEarth::Angle(nextPitch, osgEarth::Units::DEGREES);
 
         manip->setViewpoint(vp, 0.3);
+    }
+}
+
+
+void MainWindow::on_checkShowProjection_clicked(bool checked)
+{
+    if (_projLineGeode.valid()) {
+        if (checked) {
+            // 显示：设置掩码为全 F
+            _projLineGeode->setNodeMask(0xffffffff);
+        } else {
+            // 隐藏：设置掩码为 0
+            _projLineGeode->setNodeMask(0x0);
+        }
     }
 }
 

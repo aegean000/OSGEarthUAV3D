@@ -182,10 +182,42 @@
         <string>增加倾斜角</string>
        </property>
       </widget>
+      <widget class="QCheckBox" name="checkShowProjection">
+       <property name="enabled">
+        <bool>true</bool>
+       </property>
+       <property name="geometry">
+        <rect>
+         <x>10</x>
+         <y>120</y>
+         <width>71</width>
+         <height>23</height>
+        </rect>
+       </property>
+       <property name="text">
+        <string>投影线</string>
+       </property>
+       <property name="checkable">
+        <bool>true</bool>
+       </property>
+       <property name="checked">
+        <bool>true</bool>
+       </property>
+       <property name="tristate">
+        <bool>false</bool>
+       </property>
+      </widget>
      </widget>
     </item>
     <item>
-     <widget class="QWidget" name="renderBase" native="true"/>
+     <widget class="QWidget" name="renderBase" native="true">
+      <property name="enabled">
+       <bool>true</bool>
+      </property>
+      <property name="mouseTracking">
+       <bool>false</bool>
+      </property>
+     </widget>
     </item>
    </layout>
   </widget>
