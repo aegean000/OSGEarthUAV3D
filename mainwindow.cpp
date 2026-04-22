@@ -9,6 +9,7 @@
 #include <QMessageBox>
 #include <QTimer>
 
+
 // OSG 核心基础
 #include <osgDB/ReadFile>
 #include <osg/MatrixTransform>
@@ -117,7 +118,6 @@ public:
                 if (geoPos.fromWorld(_mainWin->_mapNode->getMapSRS(), worldPos) && geoPos.isValid()) {
                     osgEarth::Viewpoint vp = manip->getViewpoint();
                     vp.focalPoint() = geoPos; // 🎯 只更新中心点
-                    // ❌ 删掉 vp.range() = ... 这一行，不再强制锁定距离
                     manip->setViewpoint(vp);
                 }
             }
@@ -535,7 +535,6 @@ void MainWindow::on_btnImportData_clicked()
 
     while (!in.atEnd()) {
         QString line = in.readLine();
-        // 健壮性：跳过空行
         if (line.trimmed().isEmpty()) continue;
         if (isFirstLine) { isFirstLine = false; continue; }
 
@@ -548,19 +547,16 @@ void MainWindow::on_btnImportData_clicked()
         double lat = cols[2].toDouble();
         double alt = cols[3].toDouble();
 
-        // 经纬度转世界坐标
         osgEarth::GeoPoint(this->_mapNode->getMapSRS(), lon, lat, alt).toWorld(tp.worldPos);
         points.push_back(tp);
         lineCoords->push_back(tp.worldPos);
     }
 
-    // 严谨性校验：如果文件是空的或非法格式
     if (points.empty()) {
         QMessageBox::critical(this, "导入失败", "航迹数据为空，请检查CSV格式是否为：时间,经,纬,高");
         return;
     }
 
-    // 预计算姿态
     for (size_t i = 0; i < points.size(); ++i) {
         if (i < points.size() - 1)
             points[i].rotation = computeRotation(points[i].worldPos, points[i+1].worldPos);
@@ -568,49 +564,159 @@ void MainWindow::on_btnImportData_clicked()
             points[i].rotation = (i > 0) ? points[i-1].rotation : osg::Quat();
     }
 
-    // --- 核心：更新场景逻辑 ---
+    // 1. 自动生成唯一 trackId
+    QString trackId = QFileInfo(path).fileName();
+    int counter = 1;
+    while (_allTracks.contains(trackId)) {
+        trackId = QFileInfo(path).fileName() + QString("_%1").arg(counter++);
+    }
+
+    osg::Group* root = _osgWidget->getViewer()->getSceneData()->asGroup();
+    if (!root) return;
+
+    FlightConfig config;
+
+    // =========================
+    // A. 创建当前航迹自己的航迹线
+    // =========================
+    osg::ref_ptr<osg::Geometry> pathGeom = new osg::Geometry();
+    pathGeom->setVertexArray(lineCoords.get());
+
+    osg::ref_ptr<osg::Vec4Array> pathColors = new osg::Vec4Array();
+    pathColors->push_back(config.pathColor);
+    pathGeom->setColorArray(pathColors.get(), osg::Array::BIND_OVERALL);
+    pathGeom->addPrimitiveSet(new osg::DrawArrays(GL_LINE_STRIP, 0, lineCoords->size()));
+
+    osg::ref_ptr<osg::Geode> pathGeode = new osg::Geode();
+    pathGeode->addDrawable(pathGeom.get());
+
+    osg::StateSet* pathSS = pathGeode->getOrCreateStateSet();
+    pathSS->setAttributeAndModes(new osg::PolygonOffset(1.0f, 1.0f), osg::StateAttribute::ON);
+    pathSS->setMode(GL_LIGHTING, osg::StateAttribute::OFF | osg::StateAttribute::PROTECTED);
+    pathSS->setAttributeAndModes(new osg::LineWidth(config.lineWidth), osg::StateAttribute::ON);
+    pathSS->setRenderBinDetails(1, "RenderBin");
+
+    osgEarth::Registry::shaderGenerator().run(pathGeode.get());
+    root->addChild(pathGeode.get());
+
+    // =========================
+    // B. 创建当前航迹自己的投影线
+    // =========================
+    osg::ref_ptr<osg::Geometry> projLineGeom = new osg::Geometry();
+    osg::ref_ptr<osg::Vec3Array> projLineVertices = new osg::Vec3Array(2);
+    (*projLineVertices)[0] = points.front().worldPos;
+    (*projLineVertices)[1] = points.front().worldPos;
+
+    projLineGeom->setUseDisplayList(false);
+    projLineGeom->setUseVertexBufferObjects(true);
+    projLineGeom->setVertexArray(projLineVertices.get());
+
+    osg::ref_ptr<osg::Vec4Array> projColors = new osg::Vec4Array();
+    projColors->push_back(osg::Vec4(1.0f, 1.0f, 0.0f, 1.0f));
+    projLineGeom->setColorArray(projColors.get(), osg::Array::BIND_OVERALL);
+    projLineGeom->addPrimitiveSet(new osg::DrawArrays(GL_LINES, 0, 2));
+
+    osg::ref_ptr<osg::Geode> projLineGeode = new osg::Geode();
+    projLineGeode->addDrawable(projLineGeom.get());
+    projLineGeode->setName("ProjectionLineNode_" + trackId.toStdString());
+
+    osg::StateSet* projSS = projLineGeode->getOrCreateStateSet();
+    projSS->setMode(GL_LIGHTING, osg::StateAttribute::OFF | osg::StateAttribute::PROTECTED);
+    projSS->setAttributeAndModes(new osg::LineWidth(3.0f), osg::StateAttribute::ON);
+    projSS->setRenderBinDetails(100, "RenderBin");
+    projSS->setMode(GL_DEPTH_TEST, osg::StateAttribute::ON);
+
+    projLineGeode->setNodeMask(ui->checkShowProjection->isChecked() ? 0xffffffff : 0x0);
+    root->addChild(projLineGeode.get());
+
+    // =========================
+    // C. 创建当前航迹自己的飞机
+    // =========================
+    osg::ref_ptr<osg::PositionAttitudeTransform> planePat = new osg::PositionAttitudeTransform();
+    planePat->setNodeMask(0xffffffff);
+
+    osg::ref_ptr<osg::Node> model = osgDB::readNodeFile("D:/OSG/QT-osgearth/osgearth/data/cessna.osgb");
+    if (model.valid()) {
+        osg::StateSet* ss = model->getOrCreateStateSet();
+
+        osg::ref_ptr<osg::Material> redMat = new osg::Material;
+        redMat->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4(1, 0, 0, 1));
+        redMat->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4(0.5, 0, 0, 1));
+        redMat->setEmission(osg::Material::FRONT_AND_BACK, osg::Vec4(0.8, 0, 0, 1));
+
+        ss->setAttributeAndModes(redMat.get(), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
+        ss->setMode(GL_LIGHTING, osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
+        ss->setRenderBinDetails(10, "RenderBin");
+
+        osg::ref_ptr<osg::MatrixTransform> mt = new osg::MatrixTransform();
+        mt->setMatrix(osg::Matrix::scale(config.planeScale, config.planeScale, config.planeScale));
+        mt->addChild(model.get());
+
+        planePat->addChild(mt.get());
+        root->addChild(planePat.get());
+    }
+
     auto* newCb = new TimeBasedMoveCallback(points,
-                                            _projLineVertices.get(),
-                                            _projLineGeom.get(),
+                                            projLineVertices.get(),
+                                            projLineGeom.get(),
                                             _mapNode.get());
+
     QString curTxt = ui->comboBox->currentText();
     double curSpeed = curTxt.left(curTxt.indexOf('x')).toDouble();
     newCb->_timeScale = (curSpeed > 0) ? curSpeed : 1.0;
     newCb->isPaused = false;
-    _planePat->setUpdateCallback(newCb);
+    planePat->setUpdateCallback(newCb);
 
-    // 更新渲染线
-    updatePathRender(lineCoords);
+    // 初始化飞机位置
+    planePat->setPosition(points.front().worldPos);
+    planePat->setAttitude(points.front().rotation);
 
-    // --- ✨ 严谨性增强：激活 UI 状态 ---
-    _planePat->setNodeMask(0xffffffff); // 让原本隐藏的飞机显影
+    // =========================
+    // D. 存入 TrackObject
+    // =========================
+    TrackObject newTrack;
+    newTrack.id = trackId;
+    newTrack.points = points;
+    newTrack.planePat = planePat;
+    newTrack.pathGeode = pathGeode;
+    newTrack.pathGeom = pathGeom;
+    newTrack.projLineGeode = projLineGeode;
+    newTrack.projLineGeom = projLineGeom;
+    newTrack.projLineVertices = projLineVertices;
+
+    _allTracks.insert(trackId, newTrack);
+    _currentTrackId = trackId;
+
+    // =========================
+    // E. 绑定“当前选中轨迹”的主指针
+    // =========================
+    _planePat = planePat;
+    _pathGeom = pathGeom;
+    _projLineGeode = projLineGeode;
+    _projLineGeom = projLineGeom;
+    _projLineVertices = projLineVertices;
+
+    // =========================
+    // F. UI 更新
+    // =========================
+    ui->listWidgetTracks->addItem(trackId);
+    ui->listWidgetTracks->setCurrentRow(ui->listWidgetTracks->count() - 1);
 
     ui->btnResetView->setEnabled(true);
     ui->sliderProgress->setEnabled(true);
-
-    // 设置进度条范围 (0.1秒精度)
     ui->sliderProgress->setRange(0, static_cast<int>(newCb->_totalDuration * 10));
-    ui->sliderProgress->setValue(0); // 重置进度条到起点
+    ui->sliderProgress->setValue(0);
 
     ui->labelState->setText(QString("状态: 已加载轨迹 (%1个点)").arg(points.size()));
 
-    // --- 视角定位逻辑 ---
     osgEarth::Util::EarthManipulator* manip = dynamic_cast<osgEarth::Util::EarthManipulator*>(
         _osgWidget->getViewer()->getCameraManipulator());
     if (manip) {
         osgEarth::GeoPoint firstPt;
         if (firstPt.fromWorld(_mapNode->getMapSRS(), points[0].worldPos)) {
-            // 定位到第一个点上方，给一个稍微倾斜的视角（-45度），这样看起来更立体
             manip->setViewpoint(osgEarth::Viewpoint("Import", firstPt.x(), firstPt.y(), 0, 0, -45, 20000), 2.0);
         }
     }
-    // 投影线切换
-    if (ui->checkShowProjection->isChecked()) {
-        _projLineGeode->setNodeMask(0xffffffff);
-    } else {
-        _projLineGeode->setNodeMask(0x0);
-    }
-
 }
 //动态刷新航迹
 void MainWindow::updatePathRender(osg::Vec3Array* va) {
@@ -713,13 +819,106 @@ void MainWindow::on_btnPitchDown_clicked()
 
 void MainWindow::on_checkShowProjection_clicked(bool checked)
 {
-    if (_projLineGeode.valid()) {
-        if (checked) {
-            // 显示：设置掩码为全 F
-            _projLineGeode->setNodeMask(0xffffffff);
+    for (auto it = _allTracks.begin(); it != _allTracks.end(); ++it) {
+        if (it.value().projLineGeode.valid()) {
+            it.value().projLineGeode->setNodeMask(checked ? 0xffffffff : 0x0);
+        }
+    }
+}
+
+// 列表切换逻辑
+void MainWindow::on_listWidgetTracks_itemClicked(QListWidgetItem *item)
+{
+    if (!item) return;
+
+    QString trackId = item->text();
+    if (!_allTracks.contains(trackId)) return;
+
+    _currentTrackId = trackId;
+    TrackObject& track = _allTracks[trackId];
+
+    // 主指针重新绑定到当前选中的航迹
+    _planePat = track.planePat;
+    _projLineGeode = track.projLineGeode;
+    _projLineGeom = track.projLineGeom;
+    _projLineVertices = track.projLineVertices;
+    _pathGeom = track.pathGeom;
+
+    if (_planePat.valid()) {
+        auto* cb = dynamic_cast<TimeBasedMoveCallback*>(_planePat->getUpdateCallback());
+        if (cb) {
+            ui->sliderProgress->blockSignals(true);
+            ui->sliderProgress->setRange(0, static_cast<int>(cb->_totalDuration * 10));
+            ui->sliderProgress->setValue(static_cast<int>(cb->_currentTime * 10));
+            ui->sliderProgress->blockSignals(false);
+
+            _isPaused = cb->isPaused;
+            ui->btnPlayPause->setText(_isPaused ? "继续播放" : "暂停播放");
+        }
+    }
+
+    // 点击后视角聚焦到当前选中飞机
+    osgEarth::Util::EarthManipulator* manip = dynamic_cast<osgEarth::Util::EarthManipulator*>(
+        _osgWidget->getViewer()->getCameraManipulator());
+
+    if (manip && _planePat.valid() && _mapNode.valid()) {
+        osg::Vec3d worldPos = _planePat->getPosition();
+        osgEarth::GeoPoint geoPos;
+        if (geoPos.fromWorld(_mapNode->getMapSRS(), worldPos)) {
+            _isFollowing = false;
+            _resetTimer.start();
+
+            osgEarth::Viewpoint vp("Focus", geoPos.x(), geoPos.y(), geoPos.z(), 0, -35, 100000);
+            manip->setViewpoint(vp, 1.0);
+
+            QTimer::singleShot(1100, [this]() {
+                this->_lastRange = 100000.0;
+                this->_isFollowing = true;
+                ui->labelState->setText("状态: 自动跟随");
+            });
+        }
+    }
+}
+
+// 删除航迹逻辑
+void MainWindow::on_btnDeleteTrack_clicked()
+{
+    QListWidgetItem* item = ui->listWidgetTracks->currentItem();
+    if (!item) {
+        QMessageBox::warning(this, "提示", "请先在列表中选择要删除的航迹！");
+        return;
+    }
+
+    QString trackId = item->text();
+
+    // 1. 从 OSG 场景图中安全移除渲染节点
+    osg::Group* root = _osgWidget->getViewer()->getSceneData()->asGroup();
+    if (root && _allTracks.contains(trackId)) {
+        TrackObject& track = _allTracks[trackId];
+        if (track.planePat.valid()) root->removeChild(track.planePat);
+        if (track.projLineGeode.valid()) root->removeChild(track.projLineGeode);
+        if (track.pathGeode.valid()) root->removeChild(track.pathGeode);
+    }
+
+    // 2. 从数据结构和 UI 列表中移除
+    _allTracks.remove(trackId);
+    delete item; // 释放 UI item 内存
+
+    // 3. 处理善后：如果删除的是当前正在播放的航迹，需要重置状态
+    if (_currentTrackId == trackId) {
+        if (_allTracks.isEmpty()) {
+            // 全部删空了，彻底清空状态
+            _currentTrackId = "";
+            _planePat = nullptr;
+            _projLineGeode = nullptr;
+
+            ui->sliderProgress->setEnabled(false);
+            ui->btnResetView->setEnabled(false);
+            ui->labelState->setText("状态: 等待导入数据");
         } else {
-            // 隐藏：设置掩码为 0
-            _projLineGeode->setNodeMask(0x0);
+            // 还有别的航迹，默认选中剩下的第一个
+            ui->listWidgetTracks->setCurrentRow(0);
+            on_listWidgetTracks_itemClicked(ui->listWidgetTracks->currentItem());
         }
     }
 }
