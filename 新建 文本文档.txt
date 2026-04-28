@@ -14,7 +14,7 @@
 
     <!-- 🛰️ 局部高清影像（你刚下载的） -->
     <image name="Local_UAV_Image" driver="gdal">
-        <url>D:/OSG_QT_Project/map_tif/new.tif</url>
+        <url>D:\OSG_QT_Project\map_tif\chengdu_jinjiang_tif.tif</url>
     </image>
 
     <!-- ⛰️ 地形（保留） -->

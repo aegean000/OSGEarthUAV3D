@@ -25,6 +25,9 @@
 #include <osgEarth/EarthManipulator> // 漫游器
 #include <osgEarth/GeoData>        // 坐标转换 (GeoPoint 等)
 #include <osgEarth/Units>          // 单位转换
+#include <osgEarth/XYZ>
+#include <osgEarth/URI>
+#include <osgEarth/Registry>
 
 // 标准库
 #include <vector>
@@ -40,10 +43,42 @@ struct FlightConfig {
     double speed = 0.002;
     bool showPlane = true;
     bool showPath = true;
-    float planeScale = 50.0f;
+    float planeScale = 2.0f;
     osg::Vec4 pathColor = osg::Vec4(0.0f, 1.0f, 0.0f, 1.0f);
     float lineWidth = 4.0f;
 };
+// 天地图加载对应函数
+osgEarth::XYZImageLayer* createTianDiTuLayer(
+    const std::string& key,
+    const std::string& type,
+    const std::string& name)
+{
+    osgEarth::URIContext context;
+
+    context.addHeader("User-Agent",
+                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 Chrome/99.0 Safari/537.36");
+
+    context.addHeader("Referer", "http://localhost/");
+    context.addHeader("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8");
+    context.addHeader("Accept-Language", "zh-CN,zh;q=0.9");
+
+    // 先不要用 t[01234567]，有些版本 osgEarth 不展开这个写法
+    std::string url =
+        "http://t0.tianditu.gov.cn/DataServer?"
+        "T=" + type +
+        "&x={x}&y={y}&l={z}&tk=" + key;
+
+    osgEarth::URI uri(url, context);
+
+    osgEarth::XYZImageLayer* layer = new osgEarth::XYZImageLayer();
+    layer->setURL(uri);
+    layer->setProfile(osgEarth::Profile::create("spherical-mercator"));
+    layer->setName(name);
+    layer->setOpacity(1.0f);
+
+    return layer;
+}
 
 // ==============================================
 // 飞行动画回调类
@@ -171,6 +206,7 @@ public:
     double _timeScale = 1.0;
     double _lastFrameTime = -1.0;
     bool isPaused = true;
+    double _currentVelocity = 0.0;
 
     // --- ✅ 新增：用于操作投影线的成员变量 ---
     osg::observer_ptr<osg::Vec3Array> _lineVerts; // 投影线的顶点数组
@@ -215,13 +251,20 @@ public:
             if (idx > 0 && idx < _track.size()) {
                 const TrackPoint& p0 = _track[idx - 1];
                 const TrackPoint& p1 = _track[idx];
-                double t_ratio = (_currentTime - p0.timeOffset) / (p1.timeOffset - p0.timeOffset);
+                double segDt = p1.timeOffset - p0.timeOffset;
+                if (segDt <= 0.0) segDt = 1.0;
+
+                double t_ratio = (_currentTime - p0.timeOffset) / segDt;
 
                 osg::Vec3d currentPos = p0.worldPos + (p1.worldPos - p0.worldPos) * t_ratio;
                 pat->setPosition(currentPos);
+
                 osg::Quat rot;
                 rot.slerp(t_ratio, p0.rotation, p1.rotation);
                 pat->setAttitude(rot);
+
+                // ✅ 当前速度插值
+                _currentVelocity = p0.velocity + (p1.velocity - p0.velocity) * t_ratio;
 
                 // --- 2. ✅ 新增：动态更新投影线（严谨处理地形） ---
                 if (_lineVerts.valid() && _lineGeom.valid() && _mapNode.valid()) {
@@ -231,7 +274,7 @@ public:
 
                     // 核心：采样当前经纬度下的地形高度
                     double terrainH = 0.0;
-                    _mapNode->getTerrain()->getHeight(geoPos.getSRS(), geoPos.x(), geoPos.y(), &terrainH);
+                    // _mapNode->getTerrain()->getHeight(geoPos.getSRS(), geoPos.x(), geoPos.y(), &terrainH);  //（111）
 
                     // 构造地面接触点（高度设为采样的地形高度）
                     osgEarth::GeoPoint groundGeo(geoPos.getSRS(), geoPos.x(), geoPos.y(), terrainH);
@@ -293,6 +336,23 @@ MainWindow::MainWindow(QWidget *parent)
         QMessageBox::critical(this, "错误", "文件加载成功但未发现有效的 MapNode。");
         return;
     }
+
+    // ==============================================
+    // 加载天地图内容
+    // ==============================================
+    osgEarth::Map* map = this->_mapNode->getMap();
+
+    std::string key = "80f4e2cd107652a761bb8683f5c8f93e";
+
+    osgEarth::XYZImageLayer* imgLayer =
+        createTianDiTuLayer(key, "img_w", "TianDiTu_Image");
+
+    osgEarth::XYZImageLayer* labelLayer =
+        createTianDiTuLayer(key, "cia_w", "TianDiTu_Label");
+
+    map->addLayer(imgLayer);
+    map->addLayer(labelLayer);
+
     // ==============================================
     // 5. 创建场景根节点
     // ==============================================
@@ -338,6 +398,15 @@ MainWindow::MainWindow(QWidget *parent)
         _planePat->setNodeMask(0x0);
 
         osg::ref_ptr<osg::Node> model = osgDB::readNodeFile("D:/OSG/QT-osgearth/osgearth/data/cessna.osgb");
+        // osgDB::Registry::instance()->getDataFilePathList().push_back(
+        //     "D:/OSG_QT_Project/models/uav/source/"
+        //     );
+        // osgDB::Registry::instance()->getDataFilePathList().push_back(
+        //     "D:/OSG_QT_Project/models/uav/textures/"
+        //     );
+
+        // osg::ref_ptr<osg::Node> model =
+        //     osgDB::readNodeFile("D:/OSG_QT_Project/models/uav/source/uAV.obj");
         if (model.valid()) {
             osg::StateSet* ss = model->getOrCreateStateSet();
 
@@ -370,6 +439,7 @@ MainWindow::MainWindow(QWidget *parent)
     ui->btnResetView->setEnabled(false);
     ui->sliderProgress->setEnabled(false);
     ui->labelState->setText("状态: 等待导入数据");
+    if (ui->labelTrackInfo) ui->labelTrackInfo->setText("当前航迹信息：暂无");
     // 9. 将场景设置到 Viewer 中
     osgWidget->getViewer()->setSceneData(root);
 
@@ -448,7 +518,7 @@ MainWindow::MainWindow(QWidget *parent)
                                         .arg(stateStr)
                                         .arg(speedStr));
         }
-
+        refreshTrackInfoPanel();
 
     });
     uiTimer->start(100); // 100毫秒刷新一次
@@ -462,16 +532,64 @@ MainWindow::~MainWindow()
 {
     delete ui;
 }
-// 辅助函数：计算两个地理点之间的旋转姿态
-osg::Quat computeRotation(const osg::Vec3d& current, const osg::Vec3d& next) {
-    osg::Vec3d dir = next - current;
-    dir.normalize();
-    osg::Quat q;
-    // 假设 Cessna 模型原始朝向是负 Y 轴 (0,-1,0)
-    q.makeRotate(osg::Vec3d(0, -1, 0), dir);
-    return q;
+void MainWindow::refreshTrackInfoPanel()
+{
+    if (!ui->labelTrackInfo) return;
+
+    if (_currentTrackId.isEmpty() || !_allTracks.contains(_currentTrackId)) {
+        ui->labelTrackInfo->setText("当前航迹信息：暂无");
+        return;
+    }
+
+    const TrackObject& track = _allTracks[_currentTrackId];
+
+    double currentSpeed = 0.0;
+    if (track.planePat.valid()) {
+        auto* cb = dynamic_cast<TimeBasedMoveCallback*>(track.planePat->getUpdateCallback());
+        if (cb) {
+            currentSpeed = cb->_currentVelocity;
+        }
+    }
+
+    ui->labelTrackInfo->setText(
+        QString("航迹ID：%1\n"
+                "点数：%2\n"
+                "真实时长：%3 秒\n"
+                "当前速度：%4 m/s\n"
+                "起点：(%5, %6)\n"
+                "终点：(%7, %8)")
+            .arg(track.id)
+            .arg(track.pointCount)
+            .arg(track.totalDuration, 0, 'f', 1)
+            .arg(currentSpeed, 0, 'f', 1)
+            .arg(track.startLon, 0, 'f', 4)
+            .arg(track.startLat, 0, 'f', 4)
+            .arg(track.endLon, 0, 'f', 4)
+            .arg(track.endLat, 0, 'f', 4)
+        );
 }
 
+// 辅助函数：计算两个地理点之间的旋转姿态
+// osg::Quat computeRotation(const osg::Vec3d& current, const osg::Vec3d& next) {
+//     osg::Vec3d dir = next - current;
+//     dir.normalize();
+//     osg::Quat q;
+//     // 假设 Cessna 模型原始朝向是负 Y 轴 (0,-1,0)
+//     q.makeRotate(osg::Vec3d(0, -1, 0), dir);
+//     return q;
+// }
+
+osg::Quat computeRotationFromHeading(double headingDeg)
+{
+    double rad = osg::DegreesToRadians(headingDeg);
+
+    osg::Vec3d dir(std::sin(rad), std::cos(rad), 0.0);
+    dir.normalize();
+
+    osg::Quat q;
+    q.makeRotate(osg::Vec3d(0, -1, 0), dir); // 保持和你模型原始朝向一致
+    return q;
+}
 
 //后续的为UI点击事件等交互逻辑函数
 
@@ -500,15 +618,17 @@ void MainWindow::on_btnResetView_clicked()
             geoPos.fromWorld(_mapNode->getMapSRS(), worldPos);
 
             // 1. 设置复位视角：高度 100000
-            osgEarth::Viewpoint vp("Follow", geoPos.x(), geoPos.y(), geoPos.z(), 0, -35, 100000);
+            double followRange = 3000.0;
+
+            osgEarth::Viewpoint vp("Follow", geoPos.x(), geoPos.y(), geoPos.z(), 0, -45, followRange);
 
             _isFollowing = false;
             _resetTimer.start();
-            manip->setViewpoint(vp, 2.0); // 2秒转场动画
+            manip->setViewpoint(vp, 2.0);
 
-            QTimer::singleShot(2100, [this, currentRange = 100000.0](){
-                this->_lastRange = currentRange; // ✅ 初始化距离记录
-                this->_isFollowing = true;       // ✅ 开启自动跟随
+            QTimer::singleShot(2100, [this, followRange]() {
+                this->_lastRange = followRange;
+                this->_isFollowing = true;
                 ui->labelState->setText("状态: 自动跟随");
             });
         }
@@ -518,6 +638,8 @@ void MainWindow::on_btnResetView_clicked()
 // 导入文件的点击函数
 void MainWindow::on_btnImportData_clicked()
 {
+    QDateTime firstTime;
+    bool firstPoint = true;
     QString path = QFileDialog::getOpenFileName(this, "导入航迹", "", "CSV文件 (*.csv)");
     if (path.isEmpty()) return;
 
@@ -532,40 +654,53 @@ void MainWindow::on_btnImportData_clicked()
 
     QTextStream in(&file);
     bool isFirstLine = true;
-
+    QString csvTrackId;
     while (!in.atEnd()) {
         QString line = in.readLine();
         if (line.trimmed().isEmpty()) continue;
         if (isFirstLine) { isFirstLine = false; continue; }
 
         QStringList cols = line.split(',');
-        if (cols.size() < 4) continue;
+        if (cols.size() < 7) continue;
 
         TrackPoint tp;
-        tp.timeOffset = cols[0].toDouble();
-        double lon = cols[1].toDouble();
-        double lat = cols[2].toDouble();
-        double alt = cols[3].toDouble();
 
-        osgEarth::GeoPoint(this->_mapNode->getMapSRS(), lon, lat, alt).toWorld(tp.worldPos);
+        QString fileTrackId = cols[0].trimmed();
+        QString timeStr = cols[1].trimmed();
+        if (csvTrackId.isEmpty()) {
+            csvTrackId = fileTrackId;
+        }
+        QDateTime currentTime = QDateTime::fromString(timeStr, Qt::ISODate);
+        if (!currentTime.isValid()) continue;
+
+        if (firstPoint) {
+            firstTime = currentTime;
+            firstPoint = false;
+        }
+
+        tp.timeOffset = firstTime.secsTo(currentTime);
+
+        tp.lon = cols[2].toDouble();
+        tp.lat = cols[3].toDouble();
+        tp.alt = cols[4].toDouble();
+        tp.velocity = cols[5].toDouble();      // speed_mps
+        tp.headingDeg = cols[6].toDouble();    // heading_deg
+        double baseGroundHeight = 500.0;
+        osgEarth::GeoPoint(this->_mapNode->getMapSRS(), tp.lon, tp.lat, tp.alt + baseGroundHeight).toWorld(tp.worldPos);
+        tp.rotation = computeRotationFromHeading(tp.headingDeg);
+
         points.push_back(tp);
         lineCoords->push_back(tp.worldPos);
     }
 
     if (points.empty()) {
-        QMessageBox::critical(this, "导入失败", "航迹数据为空，请检查CSV格式是否为：时间,经,纬,高");
+        QMessageBox::critical(this, "导入失败", "航迹数据为空，请检查CSV格式是否为：track_id,timestamp,longitude,latitude,altitude_m,speed_mps,heading_deg");
         return;
     }
 
-    for (size_t i = 0; i < points.size(); ++i) {
-        if (i < points.size() - 1)
-            points[i].rotation = computeRotation(points[i].worldPos, points[i+1].worldPos);
-        else
-            points[i].rotation = (i > 0) ? points[i-1].rotation : osg::Quat();
-    }
 
     // 1. 自动生成唯一 trackId
-    QString trackId = QFileInfo(path).fileName();
+    QString trackId = csvTrackId.isEmpty() ? QFileInfo(path).fileName() : csvTrackId;
     int counter = 1;
     while (_allTracks.contains(trackId)) {
         trackId = QFileInfo(path).fileName() + QString("_%1").arg(counter++);
@@ -636,6 +771,15 @@ void MainWindow::on_btnImportData_clicked()
     planePat->setNodeMask(0xffffffff);
 
     osg::ref_ptr<osg::Node> model = osgDB::readNodeFile("D:/OSG/QT-osgearth/osgearth/data/cessna.osgb");
+    // osgDB::Registry::instance()->getDataFilePathList().push_back(
+    //     "D:/OSG_QT_Project/models/uav/source/"
+    //     );
+    // osgDB::Registry::instance()->getDataFilePathList().push_back(
+    //     "D:/OSG_QT_Project/models/uav/textures/"
+    //     );
+
+    // osg::ref_ptr<osg::Node> model =
+    //     osgDB::readNodeFile("D:/OSG_QT_Project/models/uav/source/uAV.obj");
     if (model.valid()) {
         osg::StateSet* ss = model->getOrCreateStateSet();
 
@@ -684,6 +828,19 @@ void MainWindow::on_btnImportData_clicked()
     newTrack.projLineGeom = projLineGeom;
     newTrack.projLineVertices = projLineVertices;
 
+    newTrack.pointCount = static_cast<int>(points.size());
+    newTrack.totalDuration = points.back().timeOffset;
+
+    osgEarth::GeoPoint startGeo, endGeo;
+    if (startGeo.fromWorld(_mapNode->getMapSRS(), points.front().worldPos)) {
+        newTrack.startLon = startGeo.x();
+        newTrack.startLat = startGeo.y();
+    }
+    if (endGeo.fromWorld(_mapNode->getMapSRS(), points.back().worldPos)) {
+        newTrack.endLon = endGeo.x();
+        newTrack.endLat = endGeo.y();
+    }
+
     _allTracks.insert(trackId, newTrack);
     _currentTrackId = trackId;
 
@@ -708,6 +865,7 @@ void MainWindow::on_btnImportData_clicked()
     ui->sliderProgress->setValue(0);
 
     ui->labelState->setText(QString("状态: 已加载轨迹 (%1个点)").arg(points.size()));
+    refreshTrackInfoPanel();
 
     osgEarth::Util::EarthManipulator* manip = dynamic_cast<osgEarth::Util::EarthManipulator*>(
         _osgWidget->getViewer()->getCameraManipulator());
@@ -843,6 +1001,7 @@ void MainWindow::on_listWidgetTracks_itemClicked(QListWidgetItem *item)
     _projLineGeom = track.projLineGeom;
     _projLineVertices = track.projLineVertices;
     _pathGeom = track.pathGeom;
+    refreshTrackInfoPanel();
 
     if (_planePat.valid()) {
         auto* cb = dynamic_cast<TimeBasedMoveCallback*>(_planePat->getUpdateCallback());
@@ -865,15 +1024,16 @@ void MainWindow::on_listWidgetTracks_itemClicked(QListWidgetItem *item)
         osg::Vec3d worldPos = _planePat->getPosition();
         osgEarth::GeoPoint geoPos;
         if (geoPos.fromWorld(_mapNode->getMapSRS(), worldPos)) {
+            double followRange = 3000.0;   //复位后的高度
+
+            osgEarth::Viewpoint vp("Focus", geoPos.x(), geoPos.y(), geoPos.z(), 0, -45, followRange);
             _isFollowing = false;
             _resetTimer.start();
+            manip->setViewpoint(vp, 2.0);
 
-            osgEarth::Viewpoint vp("Focus", geoPos.x(), geoPos.y(), geoPos.z(), 0, -35, 100000);
-            manip->setViewpoint(vp, 1.0);
-
-            QTimer::singleShot(1100, [this]() {
-                this->_lastRange = 100000.0;
-                this->_isFollowing = true;
+            QTimer::singleShot(2100, [this,followRange]() {
+                this->_lastRange = followRange;
+                this->_isFollowing = true;  //(111)
                 ui->labelState->setText("状态: 自动跟随");
             });
         }

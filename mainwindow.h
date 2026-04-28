@@ -2,7 +2,7 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
-#include <QTimer> // 如果你要做高度计，会用到定时器
+#include <QTimer>
 
 // OSG 核心头文件
 #include <osg/ref_ptr>
@@ -11,7 +11,6 @@
 #include <QElapsedTimer>
 #include <QListWidgetItem>
 
-// 预留 QOSGWidget 的声明（如果不包含头文件，可以用前置声明）
 class QOSGWidget;
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
@@ -19,11 +18,18 @@ QT_END_NAMESPACE
 
 // 轨迹点结构：包含空间坐标与时间戳
 struct TrackPoint {
-    double timeOffset;    // 时间轴位置（单位：秒）
-    osg::Vec3d worldPos;  // 转换后的世界坐标 (ECEF)
-    osg::Quat rotation;   // 姿态（朝向）
-    double velocity;      // 瞬时速度（用于 UI 显示）
+    double timeOffset = 0.0;   // 相对首点的秒偏移（程序内部使用）
+    osg::Vec3d worldPos;       // 世界坐标
+    osg::Quat rotation;        // 姿态（由 heading_deg 转换）
+    double velocity = 0.0;     // 真实速度，单位 m/s
+
+    double lon = 0.0;          // 方便信息面板和后续扩展
+    double lat = 0.0;
+    double alt = 0.0;
+
+    double headingDeg = 0.0;   // CSV里直接提供
 };
+
 // 单个飞机结构
 struct TrackObject {
     QString id;
@@ -38,6 +44,16 @@ struct TrackObject {
     osg::ref_ptr<osg::Geometry> pathGeom;                  // 航迹线几何体
 
     std::vector<TrackPoint> points;
+
+    // ===== 当前航迹信息面板所需 =====
+    int pointCount = 0;
+    double totalDuration = 0.0;
+    double startLon = 0.0;
+    double startLat = 0.0;
+    double endLon = 0.0;
+    double endLat = 0.0;
+    QString startTimeText;
+    QString endTimeText;
 };
 
 class MainWindow : public QMainWindow
@@ -51,56 +67,41 @@ public:
     void initProjectionLine(osg::Group* root);
 
 private slots:
-    // 按钮槽函数
     void on_sliderProgress_valueChanged(int value);
     void on_btnResetView_clicked();
-
     void on_btnImportData_clicked();
-
     void on_btnPlayPause_clicked();
-
     void on_comboBox_currentTextChanged(const QString &arg1);
-
     void on_btnPitchUp_clicked();
-
     void on_btnPitchDown_clicked();
-
     void on_checkShowProjection_clicked(bool checked);
-
     void on_listWidgetTracks_itemClicked(QListWidgetItem *item);
-
     void on_btnDeleteTrack_clicked();
 
 private:
     Ui::MainWindow *ui;
 
-    // 成员变量
     QOSGWidget* _osgWidget;
-    // --- 场景相关变量 ---
-    osg::ref_ptr<osg::Geometry> _pathGeom; // 航迹线几何体
+
+    osg::ref_ptr<osg::Geometry> _pathGeom;
     osg::ref_ptr<osg::PositionAttitudeTransform> _planePat;
     osg::observer_ptr<osgEarth::MapNode> _mapNode;
-    // 投影线相关成员变量
+
     osg::ref_ptr<osg::Geometry> _projLineGeom;
     osg::ref_ptr<osg::Vec3Array> _projLineVertices;
     osg::ref_ptr<osg::Geode> _projLineGeode;
 
-    // 单元成员变量
-    QMap<QString, TrackObject> _allTracks; // 存储所有航迹
-    QString _currentTrackId;               // 当前选中的航迹 ID
+    QMap<QString, TrackObject> _allTracks;
+    QString _currentTrackId;
 
     bool _isFollowing = false;
     QElapsedTimer _resetTimer;
-    double _lastRange = 0.0; // ✅ 用于检测缩放
+    double _lastRange = 0.0;
+
     void updatePathRender(osg::Vec3Array* va);
-    // 记录当前是否处于暂停状态（初始化建议为 false）
+    void refreshTrackInfoPanel();   // ✅ 新增
+
     bool _isPaused = false;
-
-
 };
-
-
-
-
 
 #endif // MAINWINDOW_H
