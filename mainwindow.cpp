@@ -1,11 +1,18 @@
-#include "mainwindow.h"
+﻿#include "mainwindow.h"
 #include "./ui_mainwindow.h"
 #include "QOSGWidget.h"
+#include "refactor_src/TrackLoader.h"
+#include "refactor_src/MapSceneManager.h"
+#include "refactor_src/TrackNodeBuilder.h"
+#include "refactor_src/TrackAnimationCallback.h"
+#include "refactor_src/TrackPlaybackController.h"
+#include "refactor_src/SystemConfig.h"
+
+// 主窗口实现界面初始化、用户交互响应和各功能模块的调用编排。
 
 // Qt 相关
+#include <QDebug>
 #include <QFileDialog>
-#include <QFile>
-#include <QTextStream>
 #include <QMessageBox>
 #include <QTimer>
 
@@ -16,22 +23,17 @@
 #include <osg/PositionAttitudeTransform>
 #include <osg/Geometry>
 #include <osg/LineWidth>
-#include <osg/Material>
 #include <osg/PolygonOffset>
-#include <osg/LineStipple>
 
 // osgEarth 核心
 #include <osgEarth/MapNode>        // 地图核心节点
 #include <osgEarth/EarthManipulator> // 漫游器
 #include <osgEarth/GeoData>        // 坐标转换 (GeoPoint 等)
 #include <osgEarth/Units>          // 单位转换
-#include <osgEarth/XYZ>
-#include <osgEarth/URI>
 #include <osgEarth/Registry>
 
 // 标准库
 #include <vector>
-#include <algorithm>
 
 using namespace osgEarth;
 using namespace osgEarth::Util;
@@ -43,87 +45,9 @@ struct FlightConfig {
     double speed = 0.002;
     bool showPlane = true;
     bool showPath = true;
-    float planeScale = 2.0f;
+    float planeScale = SystemConfig::Render::PlaneScale;
     osg::Vec4 pathColor = osg::Vec4(0.0f, 1.0f, 0.0f, 1.0f);
-    float lineWidth = 4.0f;
-};
-// 天地图加载对应函数
-osgEarth::XYZImageLayer* createTianDiTuLayer(
-    const std::string& key,
-    const std::string& type,
-    const std::string& name)
-{
-    osgEarth::URIContext context;
-
-    context.addHeader("User-Agent",
-                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 Chrome/99.0 Safari/537.36");
-
-    context.addHeader("Referer", "http://localhost/");
-    context.addHeader("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8");
-    context.addHeader("Accept-Language", "zh-CN,zh;q=0.9");
-
-    // 先不要用 t[01234567]，有些版本 osgEarth 不展开这个写法
-    std::string url =
-        "http://t0.tianditu.gov.cn/DataServer?"
-        "T=" + type +
-        "&x={x}&y={y}&l={z}&tk=" + key;
-
-    osgEarth::URI uri(url, context);
-
-    osgEarth::XYZImageLayer* layer = new osgEarth::XYZImageLayer();
-    layer->setURL(uri);
-    layer->setProfile(osgEarth::Profile::create("spherical-mercator"));
-    layer->setName(name);
-    layer->setOpacity(1.0f);
-
-    return layer;
-}
-
-// ==============================================
-// 飞行动画回调类
-// ==============================================
-class MoveCallback : public osg::NodeCallback
-{
-public:
-    std::vector<osg::Vec3d> path;
-    int index = 0;
-    double speed;
-    double t = 0.0;
-    bool isPaused = false; // ✅ 新增：用于任务复盘的暂停控制
-
-    MoveCallback(const std::vector<osg::Vec3d>& pts, double s) : path(pts), speed(s) {}
-
-    // ✅ 新增：供滑动条调用的跳转函数
-    void setProgress(int idx, double ratio) {
-        if (idx >= 0 && idx < (int)path.size() - 1) {
-            index = idx;
-            t = ratio;
-        }
-    }
-
-    virtual void operator()(osg::Node* node, osg::NodeVisitor* nv)
-    {
-        osg::PositionAttitudeTransform* pat = dynamic_cast<osg::PositionAttitudeTransform*>(node);
-        // ✅ 增加 isPaused 判断
-        if (!isPaused && pat && path.size() >= 2)
-        {
-            osg::Vec3d p1 = path[index];
-            osg::Vec3d p2 = path[(index + 1) % path.size()];
-            osg::Vec3d pos = p1 + (p2 - p1) * t;
-            pat->setPosition(pos);
-
-            osg::Vec3d dir = p2 - p1;
-            dir.normalize();
-            osg::Quat q;
-            q.makeRotate(osg::Vec3d(0, -1, 0), dir);
-            pat->setAttitude(q);
-
-            t += speed;
-            if (t >= 1.0) { t = 0.0; index = (index + 1) % path.size(); }
-        }
-        traverse(node, nv);
-    }
+    float lineWidth = SystemConfig::Render::PathLineWidth;
 };
 // ==============================================
 // 视角跟随回调类
@@ -142,156 +66,15 @@ public:
                 _mainWin->_osgWidget->getViewer()->getCameraManipulator());
 
             if (manip) {
-                // 动画保护：复位动画执行期间，回调不干预
-                if (_mainWin->_resetTimer.isValid() && _mainWin->_resetTimer.elapsed() < 2200) {
+                // 复位动画执行期间暂停自动跟随更新
+                if (_mainWin->_resetTimer.isValid() && _mainWin->_resetTimer.elapsed() < SystemConfig::View::FollowCallbackGuardMs) {
                     this->traverse(node, nv);
                     return;
                 }
-
-                osg::Vec3d worldPos = _mainWin->_planePat->getPosition();
-                osgEarth::GeoPoint geoPos;
-                if (geoPos.fromWorld(_mainWin->_mapNode->getMapSRS(), worldPos) && geoPos.isValid()) {
-                    osgEarth::Viewpoint vp = manip->getViewpoint();
-                    vp.focalPoint() = geoPos; // 🎯 只更新中心点
-                    manip->setViewpoint(vp);
-                }
+                _mainWin->updateFollowCamera(true);
             }
         }
         this->traverse(node, nv);
-    }
-};
-void MainWindow::initProjectionLine(osg::Group* root) {
-    if (!root) return;
-
-    _projLineGeom = new osg::Geometry();
-    _projLineVertices = new osg::Vec3Array(2);
-
-    // ✅ 修正这里：使用下标访问，这是最通用的写法
-    (*_projLineVertices)[0] = osg::Vec3(0,0,0);
-    (*_projLineVertices)[1] = osg::Vec3(0,0,0);
-
-    _projLineGeom->setUseDisplayList(false);
-    _projLineGeom->setUseVertexBufferObjects(true);
-    _projLineGeom->setVertexArray(_projLineVertices.get());
-
-    osg::ref_ptr<osg::Vec4Array> colors = new osg::Vec4Array();
-    colors->push_back(osg::Vec4(1.0f, 1.0f, 0.0f, 1.0f));
-    _projLineGeom->setColorArray(colors.get(), osg::Array::BIND_OVERALL);
-    _projLineGeom->addPrimitiveSet(new osg::DrawArrays(GL_LINES, 0, 2));
-
-    // ✅ 关键：一定要把这个 Geode 加入场景，并且只用这一个 Geode
-    _projLineGeode = new osg::Geode();
-    _projLineGeode->addDrawable(_projLineGeom.get());
-    _projLineGeode->setName("ProjectionLineNode");
-
-    osg::StateSet* ss = _projLineGeode->getOrCreateStateSet();
-    ss->setMode(GL_LIGHTING, osg::StateAttribute::OFF | osg::StateAttribute::PROTECTED);
-    ss->setAttributeAndModes(new osg::LineWidth(3.0f), osg::StateAttribute::ON);
-    ss->setRenderBinDetails(100, "RenderBin");
-    ss->setMode(GL_DEPTH_TEST, osg::StateAttribute::ON);
-
-    // ✅ 确保 root 添加的是成员变量 _projLineGeode
-    root->addChild(_projLineGeode.get());
-
-    if (ui->checkShowProjection) {
-        bool isDefaultChecked = ui->checkShowProjection->isChecked();
-        _projLineGeode->setNodeMask(isDefaultChecked ? 0xffffffff : 0x0);
-    }
-}
-class TimeBasedMoveCallback : public osg::NodeCallback {
-public:
-    std::vector<TrackPoint> _track;
-    double _currentTime = 0.0;
-    double _totalDuration = 0.0;
-    double _timeScale = 1.0;
-    double _lastFrameTime = -1.0;
-    bool isPaused = true;
-    double _currentVelocity = 0.0;
-
-    // --- ✅ 新增：用于操作投影线的成员变量 ---
-    osg::observer_ptr<osg::Vec3Array> _lineVerts; // 投影线的顶点数组
-    osg::observer_ptr<osg::Geometry> _lineGeom;   // 投影线的几何体
-    osg::observer_ptr<osgEarth::MapNode> _mapNode;                  // 用于地形高度采样
-
-    // ✅ 修改构造函数：接收投影线相关的指针
-    TimeBasedMoveCallback(const std::vector<TrackPoint>& data,
-                          osg::Vec3Array* v,
-                          osg::Geometry* g,
-                          osgEarth::MapNode* mn)
-        : _track(data), _lineVerts(v), _lineGeom(g), _mapNode(mn)
-    {
-        if (!_track.empty()) _totalDuration = _track.back().timeOffset;
-    }
-
-    void setTime(double t) {
-        _currentTime = std::max(0.0, std::min(t, _totalDuration));
-        _lastFrameTime = -1.0;
-    }
-
-    virtual void operator()(osg::Node* node, osg::NodeVisitor* nv) {
-        osg::PositionAttitudeTransform* pat = dynamic_cast<osg::PositionAttitudeTransform*>(node);
-
-        if (pat && _track.size() >= 2) {
-            // ... (这里保留你原来的 dt 计算逻辑) ...
-            double now = nv->getFrameStamp()->getSimulationTime();
-            double dt = (_lastFrameTime > 0) ? (now - _lastFrameTime) : 0.0;
-            _lastFrameTime = now;
-
-            if (!isPaused) {
-                if (dt > 0.2) dt = 0.0166;
-                _currentTime += dt * _timeScale;
-                if (_currentTime > _totalDuration) _currentTime = 0.0;
-            }
-
-            // --- 1. 更新飞机位置 ---
-            auto it = std::lower_bound(_track.begin(), _track.end(), _currentTime,
-                                       [](const TrackPoint& a, double t) { return a.timeOffset < t; });
-            int idx = std::distance(_track.begin(), it);
-
-            if (idx > 0 && idx < _track.size()) {
-                const TrackPoint& p0 = _track[idx - 1];
-                const TrackPoint& p1 = _track[idx];
-                double segDt = p1.timeOffset - p0.timeOffset;
-                if (segDt <= 0.0) segDt = 1.0;
-
-                double t_ratio = (_currentTime - p0.timeOffset) / segDt;
-
-                osg::Vec3d currentPos = p0.worldPos + (p1.worldPos - p0.worldPos) * t_ratio;
-                pat->setPosition(currentPos);
-
-                osg::Quat rot;
-                rot.slerp(t_ratio, p0.rotation, p1.rotation);
-                pat->setAttitude(rot);
-
-                // ✅ 当前速度插值
-                _currentVelocity = p0.velocity + (p1.velocity - p0.velocity) * t_ratio;
-
-                // --- 2. ✅ 新增：动态更新投影线（严谨处理地形） ---
-                if (_lineVerts.valid() && _lineGeom.valid() && _mapNode.valid()) {
-                    // 获取飞机当前的经纬度
-                    osgEarth::GeoPoint geoPos;
-                    geoPos.fromWorld(_mapNode->getMapSRS(), currentPos);
-
-                    // 核心：采样当前经纬度下的地形高度
-                    double terrainH = 0.0;
-                    // _mapNode->getTerrain()->getHeight(geoPos.getSRS(), geoPos.x(), geoPos.y(), &terrainH);  //（111）
-
-                    // 构造地面接触点（高度设为采样的地形高度）
-                    osgEarth::GeoPoint groundGeo(geoPos.getSRS(), geoPos.x(), geoPos.y(), terrainH);
-                    osg::Vec3d groundWorldPos;
-                    groundGeo.toWorld(groundWorldPos);
-
-                    // 更新顶点数组：[0]是飞机，[1]是地面
-                    (*_lineVerts)[0] = currentPos;
-                    (*_lineVerts)[1] = groundWorldPos;
-
-                    // 标记数据已更新，强制重绘
-                    _lineVerts->dirty();
-                    _lineGeom->dirtyBound();
-                }
-            }
-        }
-        traverse(node, nv);
     }
 };
 // ==============================================
@@ -301,73 +84,59 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
+    // 初始关闭航迹点和 500m 参考面显示
+    if (ui->checkShowPoints) {
+        ui->checkShowPoints->setChecked(false);
+    }
 
-    // 1. 初始化 osgEarth 资源
-    osgEarth::initialize();
+    if (ui->checkShowBasePlane) {
+        ui->checkShowBasePlane->setChecked(false);
+    }
 
-    // 2. 创建并嵌入 QOSGWidget
+
+    // 创建并嵌入 QOSGWidget
     QOSGWidget* osgWidget = new QOSGWidget(this);
     QVBoxLayout* layout = new QVBoxLayout(ui->renderBase);
     layout->addWidget(osgWidget);
     layout->setContentsMargins(0, 0, 0, 0);
     this->_osgWidget = osgWidget;
+    qInfo() << "[地图加载]" << "osgViewer 初始化完成";
 
-    // 3. 配置参数
+    // 基础显示配置
     FlightConfig config;
     config.speed = 0.002;
     config.showPath = true;
     config.showPlane = true;
-
     // ==============================================
-    // 4. 构建地图节点 (已修正：加入缓存配置并解决重定义)
+    // 构建地图节点
     // ==============================================
-    // 核心：直接读取 .earth 配置文件
-    osg::ref_ptr<osg::Node> loadedNode = osgDB::readNodeFile("mymap.earth");
-
-    if (!loadedNode.valid()) {
-        QMessageBox::critical(this, "错误", "无法加载 mymap.earth 文件！请确保它在运行目录下。");
+    MapSceneManager mapSceneManager;
+    if (!mapSceneManager.initialize(SystemConfig::Resource::MapFile)) {
+        if (mapSceneManager.errorType() == MapSceneManager::EarthFileLoadFailed) {
+            QMessageBox::critical(this, "错误", "无法加载 mymap.earth 文件！请确保它在运行目录下。");
+        } else {
+            QMessageBox::critical(this, "错误", "文件加载成功但未发现有效的 MapNode。");
+        }
         return;
     }
 
-    // 找到 MapNode (这是 osgEarth 操作的核心入口)
-    this->_mapNode = osgEarth::MapNode::findMapNode(loadedNode.get());
-
-    if (!this->_mapNode.valid()) {
-        QMessageBox::critical(this, "错误", "文件加载成功但未发现有效的 MapNode。");
-        return;
-    }
+    this->_mapNode = mapSceneManager.mapNode();
 
     // ==============================================
-    // 加载天地图内容
-    // ==============================================
-    osgEarth::Map* map = this->_mapNode->getMap();
-
-    std::string key = "80f4e2cd107652a761bb8683f5c8f93e";
-
-    osgEarth::XYZImageLayer* imgLayer =
-        createTianDiTuLayer(key, "img_w", "TianDiTu_Image");
-
-    osgEarth::XYZImageLayer* labelLayer =
-        createTianDiTuLayer(key, "cia_w", "TianDiTu_Label");
-
-    map->addLayer(imgLayer);
-    map->addLayer(labelLayer);
-
-    // ==============================================
-    // 5. 创建场景根节点
+    // 创建场景根节点
     // ==============================================
     osg::ref_ptr<osg::Group> root = new osg::Group();
     root->addChild(this->_mapNode.get());
-    this->initProjectionLine(root.get());   // 初始化垂直投影线
-    // 6. 绘制航线 (初始化空航线)
+    qInfo() << "[地图加载]" << "场景根节点初始化完成";
+    // 初始化空航线
     if (config.showPath) {
-        _pathGeom = new osg::Geometry(); // ✅ 赋值给成员变量
+        _pathGeom = new osg::Geometry(); // 赋值给成员变量
 
-        // 初始化一个空的顶点数组
+        // 初始化空顶点数组
         osg::ref_ptr<osg::Vec3Array> emptyVa = new osg::Vec3Array();
         _pathGeom->setVertexArray(emptyVa);
 
-        // 初始时不添加任何绘制指令 (DrawArrays)，因为现在没有点
+        // 无航迹点时不添加绘制指令
 
         osg::ref_ptr<osg::Vec4Array> colors = new osg::Vec4Array();
         colors->push_back(config.pathColor);
@@ -377,7 +146,7 @@ MainWindow::MainWindow(QWidget *parent)
         lineGeode->addDrawable(_pathGeom.get());
 
         osg::StateSet* ss = lineGeode->getOrCreateStateSet();
-        // 开启深度偏移，防止线嵌入地图
+        // 开启深度偏移，防止线嵌入地面
         ss->setAttributeAndModes(new osg::PolygonOffset(1.0f, 1.0f), osg::StateAttribute::ON);
         // 关闭光照
         ss->setMode(GL_LIGHTING, osg::StateAttribute::OFF | osg::StateAttribute::PROTECTED);
@@ -387,42 +156,22 @@ MainWindow::MainWindow(QWidget *parent)
         osgEarth::Registry::shaderGenerator().run(lineGeode);
         root->addChild(lineGeode);
 
-        // 设置渲染队列，确保航迹在基础地图之上绘制
+        // 设置渲染队列，保证航迹显示在基础地图之上
         ss->setRenderBinDetails(1, "RenderBin");
     }
     osg::ref_ptr<osg::PositionAttitudeTransform> pat;
-    _planePat = new osg::PositionAttitudeTransform();   //将其赋值给_planePat，方便点击事件控制
-    // 7. 绘制飞机 (初始化：加载模型但不设置初始位置和回调)
+    _planePat = new osg::PositionAttitudeTransform();   // 将其赋值给 _planePat，方便点击事件控制
+    // 初始化飞机模型
     if (config.showPlane) {
-        // 初始状态下隐藏飞机，直到 CSV 导入数据
+        // 导入 CSV 前隐藏飞机
         _planePat->setNodeMask(0x0);
 
-        osg::ref_ptr<osg::Node> model = osgDB::readNodeFile("D:/OSG/QT-osgearth/osgearth/data/cessna.osgb");
-        // osgDB::Registry::instance()->getDataFilePathList().push_back(
-        //     "D:/OSG_QT_Project/models/uav/source/"
-        //     );
-        // osgDB::Registry::instance()->getDataFilePathList().push_back(
-        //     "D:/OSG_QT_Project/models/uav/textures/"
-        //     );
+        qInfo() << "[模型回放]" << "开始加载无人机模型：" << SystemConfig::Resource::DroneModelFile;
+        osg::ref_ptr<osg::Node> model =
+            osgDB::readNodeFile(SystemConfig::Resource::DroneModelFile);
 
-        // osg::ref_ptr<osg::Node> model =
-        //     osgDB::readNodeFile("D:/OSG_QT_Project/models/uav/source/uAV.obj");
         if (model.valid()) {
-            osg::StateSet* ss = model->getOrCreateStateSet();
-
-            // 修改材质：添加自发光 (Emission)
-            osg::ref_ptr<osg::Material> redMat = new osg::Material;
-            redMat->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4(1, 0, 0, 1));
-            redMat->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4(0.5, 0, 0, 1));
-            redMat->setEmission(osg::Material::FRONT_AND_BACK, osg::Vec4(0.8, 0, 0, 1));
-
-            ss->setAttributeAndModes(redMat.get(), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
-
-            // 关闭光照，确保红色纯正
-            ss->setMode(GL_LIGHTING, osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
-
-            // 确保渲染顺序在航迹线之后 (Bin 10)
-            ss->setRenderBinDetails(10, "RenderBin");
+            qInfo() << "[模型回放]" << "无人机模型加载成功";
 
             // 缩放控制
             osg::ref_ptr<osg::MatrixTransform> mt = new osg::MatrixTransform();
@@ -431,87 +180,91 @@ MainWindow::MainWindow(QWidget *parent)
 
             _planePat->addChild(mt);
 
-            // 现在的逻辑是：导入 CSV 时才 setUpdateCallback 为 TimeBasedMoveCallback
+            // 导入 CSV 后绑定 TrackAnimationCallback
             root->addChild(_planePat);
+        } else {
+            qWarning() << "[模型回放]" << "无人机模型预加载失败：" << SystemConfig::Resource::DroneModelFile;
         }
     }
-    // 8. [重要] 初始禁用相关按钮
+    // 初始化按钮状态
     ui->btnResetView->setEnabled(false);
     ui->sliderProgress->setEnabled(false);
-    ui->labelState->setText("状态: 等待导入数据");
+    ui->labelState->setText("状态：等待导入数据");
     if (ui->labelTrackInfo) ui->labelTrackInfo->setText("当前航迹信息：暂无");
-    // 9. 将场景设置到 Viewer 中
+    // 设置 Viewer 场景数据
     osgWidget->getViewer()->setSceneData(root);
 
-    // 10. 设置漫游器并开启跟随
-    osgEarth::Util::EarthManipulator* manip = new osgEarth::Util::EarthManipulator();
-    osgWidget->getViewer()->setCameraManipulator(manip);
+    // 设置地图漫游器
+    mapSceneManager.setupEarthManipulator(osgWidget->getViewer());
+    qInfo() << "[地图加载]" << "三维地图场景初始化完成";
 
-    // 初始化进度条范围
-    ui->sliderProgress->setRange(0, 1000); // 对应你 coords 数组的索引 0, 1, 2
+    // 设置进度条初始范围
+    ui->sliderProgress->setRange(0, 1000); // 对应 coords 数组的索引 0, 1, 2
 
-    // 创建定时器刷新 UI 仪表盘
+    // 定时刷新 UI 状态
     QTimer* uiTimer = new QTimer(this);
     connect(uiTimer, &QTimer::timeout, this, [this]() {
-        // 1. 基础指针检查
+        // 基础指针检查
         if (!_osgWidget || !_planePat.valid() || !_mapNode.valid()) return;
         osgViewer::Viewer* viewer = _osgWidget->getViewer();
         osgEarth::Util::EarthManipulator* manip = dynamic_cast<osgEarth::Util::EarthManipulator*>(
             viewer->getCameraManipulator());
 
         if (manip) {
-            // --- ✅ 核心：用户交互检测 ---
+            // 用户交互检测
             const osgGA::GUIEventAdapter* ea = viewer->getEventQueue()->getCurrentEventState();
             double currentRange = 0.0;
             if (manip->getViewpoint().range().isSet()) {
-                // 强制转换为双精度浮点数
+                // 转换为米制距离
                 currentRange = manip->getViewpoint().range().value().as(osgEarth::Units::METERS);
             }
 
             if (_isFollowing) {
-                // 1. 检测鼠标按键：如果用户按下左键/右键（尝试拖拽或旋转）
-                bool mousePressed = (ea && ea->getButtonMask() != 0);
+                if (_resetTimer.isValid() && _resetTimer.elapsed() < SystemConfig::View::UserInteractionGuardMs) {
+                    _lastRange = currentRange;
+                } else {
+                    bool mousePressed = (ea && ea->getButtonMask() != 0);
+                    bool rangeChanged = (_lastRange > 0 && std::abs(currentRange - _lastRange) > SystemConfig::View::RangeChangeThreshold);
 
-                // 2. 检测滚轮缩放：如果当前距离和上次记录的距离差异较大
-                bool rangeChanged = (_lastRange > 0 && std::abs(currentRange - _lastRange) > 1.0);
-
-                if (mousePressed || rangeChanged) {
-                    _isFollowing = false; // 🛑 立即断开跟随
-                    ui->labelState->setText("状态: 手动模式");
+                    if (mousePressed || rangeChanged) {
+                        _isFollowing = false;
+                        qInfo() << "[视角控制]" << "自动跟随关闭，切换为手动观察";
+                        ui->labelState->setText("状态：手动模式");
+                    }
                 }
             }
-            // 更新距离记录，供下一帧对比
+            // 记录当前视距用于下一次比较
             _lastRange = currentRange;
         }
-        // 2. 获取飞机当前位置
+        // 获取飞机当前位置
         osg::Vec3d worldPos = _planePat->getPosition();
         osgEarth::GeoPoint geoPos;
         if (!geoPos.fromWorld(_mapNode->getMapSRS(), worldPos)) return;
 
-        // --- UI 仪表盘同步 (始终运行) ---
+        // 同步位置显示
         ui->labelPos->setText(QString("位置: %1, %2")
                                   .arg(geoPos.x(), 0, 'f', 4)
                                   .arg(geoPos.y(), 0, 'f', 4));
-        ui->labelAlt->setText(QString("%1 m").arg(geoPos.z(), 0, 'f', 1));
 
-        // 进度条逻辑同步
-        TimeBasedMoveCallback* tbc = dynamic_cast<TimeBasedMoveCallback*>(_planePat->getUpdateCallback());
-        if (tbc) {
+        // 同步进度条状态
+        TrackPlaybackController playbackController;
+        playbackController.bind(_planePat.get());
+        if (playbackController.hasCallback()) {
             ui->sliderProgress->blockSignals(true);
-            ui->sliderProgress->setValue(static_cast<int>(tbc->_currentTime * 10));
+            ui->sliderProgress->setValue(static_cast<int>(playbackController.currentTime() * SystemConfig::Playback::SliderTimeScale));
             ui->sliderProgress->blockSignals(false);
 
-            int curSec = (int)tbc->_currentTime;
-            int totSec = (int)tbc->_totalDuration;
+            int curSec = (int)playbackController.currentTime();
+            int totSec = (int)playbackController.totalDuration();
 
-            // ✅ 改进：获取当前的倍速，并一起显示出来
-            double currentSpeed = tbc->_timeScale;
+            // 同步播放倍率显示
+            double currentSpeed = playbackController.timeScale();
             QString speedStr = (currentSpeed == 1.0) ? "" : QString(" [%1x]").arg(currentSpeed);
 
-            // 状态判断
-            QString stateStr = tbc->isPaused ? "已暂停" : "正在回放";
+            // 同步播放状态
+            QString stateStr = playbackController.isPaused() ? "已暂停" : "正在回放";
 
-            // 综合显示：进度: 10s / 60s | 正在回放 [2.0x]
+            // 显示播放进度和状态
             ui->labelState->setText(QString("进度: %1s / %2s | %3%4")
                                         .arg(curSec)
                                         .arg(totSec)
@@ -521,8 +274,8 @@ MainWindow::MainWindow(QWidget *parent)
         refreshTrackInfoPanel();
 
     });
-    uiTimer->start(100); // 100毫秒刷新一次
-    // 利用 MapNode 的更新回调实现丝滑跟随（每帧执行）
+    uiTimer->start(SystemConfig::Playback::UiRefreshIntervalMs); // 100 毫秒刷新一次
+    // 通过 MapNode 更新回调实现自动跟随
     _mapNode->addUpdateCallback(new CameraFollowCallback(this));
 
 
@@ -536,19 +289,46 @@ void MainWindow::refreshTrackInfoPanel()
 {
     if (!ui->labelTrackInfo) return;
 
-    if (_currentTrackId.isEmpty() || !_allTracks.contains(_currentTrackId)) {
+    const TrackObject* trackPtr = _trackManager.currentTrack();
+    if (!trackPtr) {
         ui->labelTrackInfo->setText("当前航迹信息：暂无");
         return;
     }
 
-    const TrackObject& track = _allTracks[_currentTrackId];
+    const TrackObject& track = *trackPtr;
 
     double currentSpeed = 0.0;
     if (track.planePat.valid()) {
-        auto* cb = dynamic_cast<TimeBasedMoveCallback*>(track.planePat->getUpdateCallback());
-        if (cb) {
-            currentSpeed = cb->_currentVelocity;
-        }
+        TrackPlaybackController playbackController;
+        playbackController.bind(track.planePat.get());
+        currentSpeed = playbackController.currentVelocity();
+    }
+
+    QString speedCheckText;
+
+    if (track.abnormalSpeedCount > 0) {
+        speedCheckText = QString("速度校验：发现 %1 个异常航段，%2 个可疑航段\n"
+                                 "最大计算速度：%3 m/s\n"
+                                 "最大速度误差：%4 m/s\n")
+                             .arg(track.abnormalSpeedCount)
+                             .arg(track.warningSpeedCount)
+                             .arg(track.maxActualSpeed, 0, 'f', 1)
+                             .arg(track.maxSpeedError, 0, 'f', 1);
+    }
+    else if (track.warningSpeedCount > 0) {
+        speedCheckText = QString("速度校验：未发现异常，存在 %1 个可疑航段\n"
+                                 "最大计算速度：%2 m/s\n"
+                                 "最大速度误差：%3 m/s\n")
+                             .arg(track.warningSpeedCount)
+                             .arg(track.maxActualSpeed, 0, 'f', 1)
+                             .arg(track.maxSpeedError, 0, 'f', 1);
+    }
+    else {
+        speedCheckText = QString("速度校验：正常\n"
+                                 "最大计算速度：%1 m/s\n"
+                                 "最大速度误差：%2 m/s\n")
+                             .arg(track.maxActualSpeed, 0, 'f', 1)
+                             .arg(track.maxSpeedError, 0, 'f', 1);
     }
 
     ui->labelTrackInfo->setText(
@@ -556,12 +336,14 @@ void MainWindow::refreshTrackInfoPanel()
                 "点数：%2\n"
                 "真实时长：%3 秒\n"
                 "当前速度：%4 m/s\n"
-                "起点：(%5, %6)\n"
-                "终点：(%7, %8)")
+                "%5"
+                "起点：(%6, %7)\n"
+                "终点：(%8, %9)")
             .arg(track.id)
             .arg(track.pointCount)
             .arg(track.totalDuration, 0, 'f', 1)
             .arg(currentSpeed, 0, 'f', 1)
+            .arg(speedCheckText)
             .arg(track.startLon, 0, 'f', 4)
             .arg(track.startLat, 0, 'f', 4)
             .arg(track.endLon, 0, 'f', 4)
@@ -569,267 +351,161 @@ void MainWindow::refreshTrackInfoPanel()
         );
 }
 
-// 辅助函数：计算两个地理点之间的旋转姿态
-// osg::Quat computeRotation(const osg::Vec3d& current, const osg::Vec3d& next) {
-//     osg::Vec3d dir = next - current;
-//     dir.normalize();
-//     osg::Quat q;
-//     // 假设 Cessna 模型原始朝向是负 Y 轴 (0,-1,0)
-//     q.makeRotate(osg::Vec3d(0, -1, 0), dir);
-//     return q;
-// }
-
-osg::Quat computeRotationFromHeading(double headingDeg)
+bool MainWindow::updateFollowCamera(bool instant)
 {
-    double rad = osg::DegreesToRadians(headingDeg);
+    if (!_osgWidget || !_planePat.valid() || !_mapNode.valid()) return false;
 
-    osg::Vec3d dir(std::sin(rad), std::cos(rad), 0.0);
-    dir.normalize();
+    osgEarth::Util::EarthManipulator* manip = dynamic_cast<osgEarth::Util::EarthManipulator*>(
+        _osgWidget->getViewer()->getCameraManipulator());
+    if (!manip) return false;
 
-    osg::Quat q;
-    q.makeRotate(osg::Vec3d(0, -1, 0), dir); // 保持和你模型原始朝向一致
-    return q;
+    osgEarth::GeoPoint geoPos;
+    if (!geoPos.fromWorld(_mapNode->getMapSRS(), _planePat->getPosition()) || !geoPos.isValid()) {
+        return false;
+    }
+
+    osgEarth::Viewpoint vp("Follow",
+                           geoPos.x(),
+                           geoPos.y(),
+                           geoPos.z(),
+                           0.0,
+                           _followPitch,
+                           _followRange);
+    manip->setViewpoint(vp, instant ? 0.0 : _followDuration);
+    _lastRange = _followRange;
+    return true;
 }
 
-//后续的为UI点击事件等交互逻辑函数
+void MainWindow::focusCurrentAircraft(bool instant)
+{
+    if (!updateFollowCamera(instant)) return;
 
-// 控制无人机飞行进度的点击函数
+    _resetTimer.start();
+    _isFollowing = true;
+    ui->labelState->setText("状态：自动跟随");
+    qInfo() << "[视角控制]" << (instant ? "快速定位到当前无人机并开启自动跟随"
+                                      : "定位到当前无人机并开启自动跟随");
+}
+
+// UI 交互槽函数
+
+// 进度条跳转
 
 void MainWindow::on_sliderProgress_valueChanged(int value)
 {
     if (_planePat.valid()) {
-        auto* cb = dynamic_cast<TimeBasedMoveCallback*>(_planePat->getUpdateCallback());
-        if (cb) {
-            cb->setTime(value / 10.0); // 将 slider 的整数值转回秒
-        }
+        TrackPlaybackController playbackController;
+        playbackController.bind(_planePat.get());
+        double targetTime = value / static_cast<double>(SystemConfig::Playback::SliderTimeScale);
+        qInfo() << "[播放控制]" << "进度条跳转，目标时间：" << targetTime << "s";
+        playbackController.setTime(targetTime); // slider 的整数值转回秒
     }
 }
 
-// 复位视角的点击函数
+// 复位视角
 void MainWindow::on_btnResetView_clicked()
 {
-    if (_osgWidget && _planePat.valid() && _mapNode.valid()) {
-        osgEarth::Util::EarthManipulator* manip = dynamic_cast<osgEarth::Util::EarthManipulator*>(
-            _osgWidget->getViewer()->getCameraManipulator());
-
-        if (manip) {
-            osg::Vec3d worldPos = _planePat->getPosition();
-            osgEarth::GeoPoint geoPos;
-            geoPos.fromWorld(_mapNode->getMapSRS(), worldPos);
-
-            // 1. 设置复位视角：高度 100000
-            double followRange = 3000.0;
-
-            osgEarth::Viewpoint vp("Follow", geoPos.x(), geoPos.y(), geoPos.z(), 0, -45, followRange);
-
-            _isFollowing = false;
-            _resetTimer.start();
-            manip->setViewpoint(vp, 2.0);
-
-            QTimer::singleShot(2100, [this, followRange]() {
-                this->_lastRange = followRange;
-                this->_isFollowing = true;
-                ui->labelState->setText("状态: 自动跟随");
-            });
-        }
-    }
+    qInfo() << "[视角控制]" << "用户点击视角重置";
+    focusCurrentAircraft(true);
 }
 
-// 导入文件的点击函数
+// 导入航迹数据
 void MainWindow::on_btnImportData_clicked()
 {
-    QDateTime firstTime;
-    bool firstPoint = true;
+    qInfo() << "[航迹导入]" << "用户点击导入航迹按钮";
     QString path = QFileDialog::getOpenFileName(this, "导入航迹", "", "CSV文件 (*.csv)");
-    if (path.isEmpty()) return;
+    if (path.isEmpty()) {
+        qWarning() << "[航迹导入]" << "用户取消选择 CSV 文件";
+        return;
+    }
+    qInfo() << "[航迹导入]" << "选择文件：" << path;
 
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        QMessageBox::warning(this, "错误", "无法打开所选文件！");
+    TrackLoader loader;
+    TrackLoadResult loadResult = loader.loadCsv(path, _mapNode.get());
+    if (!loadResult.ok) {
+        qWarning() << "[航迹导入]" << "导入失败：" << loadResult.errorMessage;
+        if (loadResult.errorType == TrackLoadResult::OpenFailed) {
+            QMessageBox::warning(this, "错误", "无法打开所选文件！");
+        } else {
+            QMessageBox::critical(this, "导入失败", "航迹数据为空，请检查CSV格式是否为：track_id,timestamp,longitude,latitude,altitude_m,speed_mps,heading_deg");
+        }
         return;
     }
 
-    std::vector<TrackPoint> points;
-    osg::ref_ptr<osg::Vec3Array> lineCoords = new osg::Vec3Array();
-
-    QTextStream in(&file);
-    bool isFirstLine = true;
-    QString csvTrackId;
-    while (!in.atEnd()) {
-        QString line = in.readLine();
-        if (line.trimmed().isEmpty()) continue;
-        if (isFirstLine) { isFirstLine = false; continue; }
-
-        QStringList cols = line.split(',');
-        if (cols.size() < 7) continue;
-
-        TrackPoint tp;
-
-        QString fileTrackId = cols[0].trimmed();
-        QString timeStr = cols[1].trimmed();
-        if (csvTrackId.isEmpty()) {
-            csvTrackId = fileTrackId;
-        }
-        QDateTime currentTime = QDateTime::fromString(timeStr, Qt::ISODate);
-        if (!currentTime.isValid()) continue;
-
-        if (firstPoint) {
-            firstTime = currentTime;
-            firstPoint = false;
-        }
-
-        tp.timeOffset = firstTime.secsTo(currentTime);
-
-        tp.lon = cols[2].toDouble();
-        tp.lat = cols[3].toDouble();
-        tp.alt = cols[4].toDouble();
-        tp.velocity = cols[5].toDouble();      // speed_mps
-        tp.headingDeg = cols[6].toDouble();    // heading_deg
-        double baseGroundHeight = 500.0;
-        osgEarth::GeoPoint(this->_mapNode->getMapSRS(), tp.lon, tp.lat, tp.alt + baseGroundHeight).toWorld(tp.worldPos);
-        tp.rotation = computeRotationFromHeading(tp.headingDeg);
-
-        points.push_back(tp);
-        lineCoords->push_back(tp.worldPos);
-    }
-
-    if (points.empty()) {
-        QMessageBox::critical(this, "导入失败", "航迹数据为空，请检查CSV格式是否为：track_id,timestamp,longitude,latitude,altitude_m,speed_mps,heading_deg");
-        return;
-    }
+    std::vector<TrackPoint> points = loadResult.points;
+    osg::ref_ptr<osg::Vec3Array> lineCoords = loadResult.lineCoords;
+    QString csvTrackId = loadResult.csvTrackId;
+    int warningSpeedCount = loadResult.warningSpeedCount;
+    int abnormalSpeedCount = loadResult.abnormalSpeedCount;
+    double maxActualSpeed = loadResult.maxActualSpeed;
+    double maxSpeedError = loadResult.maxSpeedError;
 
 
-    // 1. 自动生成唯一 trackId
-    QString trackId = csvTrackId.isEmpty() ? QFileInfo(path).fileName() : csvTrackId;
-    int counter = 1;
-    while (_allTracks.contains(trackId)) {
-        trackId = QFileInfo(path).fileName() + QString("_%1").arg(counter++);
-    }
+    // 生成唯一 trackId
+    QString trackId = _trackManager.makeUniqueTrackId(csvTrackId, path);
 
     osg::Group* root = _osgWidget->getViewer()->getSceneData()->asGroup();
     if (!root) return;
 
-    FlightConfig config;
+    TrackRenderConfig renderConfig;
+    TrackNodeBuilder nodeBuilder;
+    TrackObject newTrack = nodeBuilder.buildTrackObject(
+        trackId,
+        loadResult,
+        root,
+        _mapNode.get(),
+        ui->checkShowProjection->isChecked(),
+        renderConfig);
 
-    // =========================
-    // A. 创建当前航迹自己的航迹线
-    // =========================
-    osg::ref_ptr<osg::Geometry> pathGeom = new osg::Geometry();
-    pathGeom->setVertexArray(lineCoords.get());
+    osg::ref_ptr<osg::Geometry> pathGeom = newTrack.pathGeom;
+    osg::ref_ptr<osg::Geode> pathGeode = newTrack.pathGeode;
+    osg::ref_ptr<osg::Geode> pointGeode = newTrack.pointGeode;
+    osg::ref_ptr<osg::Geode> basePlaneGeode = newTrack.basePlaneGeode;
+    osg::ref_ptr<osg::Geometry> projLineGeom = newTrack.projLineGeom;
+    osg::ref_ptr<osg::Vec3Array> projLineVertices = newTrack.projLineVertices;
+    osg::ref_ptr<osg::Geode> projLineGeode = newTrack.projLineGeode;
+    osg::ref_ptr<osg::PositionAttitudeTransform> planePat = newTrack.planePat;
 
-    osg::ref_ptr<osg::Vec4Array> pathColors = new osg::Vec4Array();
-    pathColors->push_back(config.pathColor);
-    pathGeom->setColorArray(pathColors.get(), osg::Array::BIND_OVERALL);
-    pathGeom->addPrimitiveSet(new osg::DrawArrays(GL_LINE_STRIP, 0, lineCoords->size()));
-
-    osg::ref_ptr<osg::Geode> pathGeode = new osg::Geode();
-    pathGeode->addDrawable(pathGeom.get());
-
-    osg::StateSet* pathSS = pathGeode->getOrCreateStateSet();
-    pathSS->setAttributeAndModes(new osg::PolygonOffset(1.0f, 1.0f), osg::StateAttribute::ON);
-    pathSS->setMode(GL_LIGHTING, osg::StateAttribute::OFF | osg::StateAttribute::PROTECTED);
-    pathSS->setAttributeAndModes(new osg::LineWidth(config.lineWidth), osg::StateAttribute::ON);
-    pathSS->setRenderBinDetails(1, "RenderBin");
-
-    osgEarth::Registry::shaderGenerator().run(pathGeode.get());
-    root->addChild(pathGeode.get());
-
-    // =========================
-    // B. 创建当前航迹自己的投影线
-    // =========================
-    osg::ref_ptr<osg::Geometry> projLineGeom = new osg::Geometry();
-    osg::ref_ptr<osg::Vec3Array> projLineVertices = new osg::Vec3Array(2);
-    (*projLineVertices)[0] = points.front().worldPos;
-    (*projLineVertices)[1] = points.front().worldPos;
-
-    projLineGeom->setUseDisplayList(false);
-    projLineGeom->setUseVertexBufferObjects(true);
-    projLineGeom->setVertexArray(projLineVertices.get());
-
-    osg::ref_ptr<osg::Vec4Array> projColors = new osg::Vec4Array();
-    projColors->push_back(osg::Vec4(1.0f, 1.0f, 0.0f, 1.0f));
-    projLineGeom->setColorArray(projColors.get(), osg::Array::BIND_OVERALL);
-    projLineGeom->addPrimitiveSet(new osg::DrawArrays(GL_LINES, 0, 2));
-
-    osg::ref_ptr<osg::Geode> projLineGeode = new osg::Geode();
-    projLineGeode->addDrawable(projLineGeom.get());
-    projLineGeode->setName("ProjectionLineNode_" + trackId.toStdString());
-
-    osg::StateSet* projSS = projLineGeode->getOrCreateStateSet();
-    projSS->setMode(GL_LIGHTING, osg::StateAttribute::OFF | osg::StateAttribute::PROTECTED);
-    projSS->setAttributeAndModes(new osg::LineWidth(3.0f), osg::StateAttribute::ON);
-    projSS->setRenderBinDetails(100, "RenderBin");
-    projSS->setMode(GL_DEPTH_TEST, osg::StateAttribute::ON);
-
-    projLineGeode->setNodeMask(ui->checkShowProjection->isChecked() ? 0xffffffff : 0x0);
-    root->addChild(projLineGeode.get());
-
-    // =========================
-    // C. 创建当前航迹自己的飞机
-    // =========================
-    osg::ref_ptr<osg::PositionAttitudeTransform> planePat = new osg::PositionAttitudeTransform();
-    planePat->setNodeMask(0xffffffff);
-
-    osg::ref_ptr<osg::Node> model = osgDB::readNodeFile("D:/OSG/QT-osgearth/osgearth/data/cessna.osgb");
-    // osgDB::Registry::instance()->getDataFilePathList().push_back(
-    //     "D:/OSG_QT_Project/models/uav/source/"
-    //     );
-    // osgDB::Registry::instance()->getDataFilePathList().push_back(
-    //     "D:/OSG_QT_Project/models/uav/textures/"
-    //     );
-
-    // osg::ref_ptr<osg::Node> model =
-    //     osgDB::readNodeFile("D:/OSG_QT_Project/models/uav/source/uAV.obj");
-    if (model.valid()) {
-        osg::StateSet* ss = model->getOrCreateStateSet();
-
-        osg::ref_ptr<osg::Material> redMat = new osg::Material;
-        redMat->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4(1, 0, 0, 1));
-        redMat->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4(0.5, 0, 0, 1));
-        redMat->setEmission(osg::Material::FRONT_AND_BACK, osg::Vec4(0.8, 0, 0, 1));
-
-        ss->setAttributeAndModes(redMat.get(), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
-        ss->setMode(GL_LIGHTING, osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
-        ss->setRenderBinDetails(10, "RenderBin");
-
-        osg::ref_ptr<osg::MatrixTransform> mt = new osg::MatrixTransform();
-        mt->setMatrix(osg::Matrix::scale(config.planeScale, config.planeScale, config.planeScale));
-        mt->addChild(model.get());
-
-        planePat->addChild(mt.get());
-        root->addChild(planePat.get());
-    }
-
-    auto* newCb = new TimeBasedMoveCallback(points,
+    auto* newCb = new TrackAnimationCallback(points,
                                             projLineVertices.get(),
                                             projLineGeom.get(),
                                             _mapNode.get());
 
     QString curTxt = ui->comboBox->currentText();
     double curSpeed = curTxt.left(curTxt.indexOf('x')).toDouble();
-    newCb->_timeScale = (curSpeed > 0) ? curSpeed : 1.0;
-    newCb->isPaused = false;
     planePat->setUpdateCallback(newCb);
+    qInfo() << "[模型回放]" << "回放回调初始化完成";
 
-    // 初始化飞机位置
+    TrackPlaybackController newPlaybackController;
+    newPlaybackController.bind(planePat.get());
+    newPlaybackController.setTimeScale((curSpeed > 0) ? curSpeed : 1.0);
+    newPlaybackController.setPaused(true);
+
+    // 设置飞机初始位置
     planePat->setPosition(points.front().worldPos);
     planePat->setAttitude(points.front().rotation);
+    qInfo() << "[模型回放]" << "模型初始位置设置完成";
 
     // =========================
-    // D. 存入 TrackObject
+    // 写入 TrackObject
     // =========================
-    TrackObject newTrack;
     newTrack.id = trackId;
     newTrack.points = points;
     newTrack.planePat = planePat;
     newTrack.pathGeode = pathGeode;
     newTrack.pathGeom = pathGeom;
+    newTrack.pointGeode = pointGeode;
+    newTrack.basePlaneGeode = basePlaneGeode;
     newTrack.projLineGeode = projLineGeode;
     newTrack.projLineGeom = projLineGeom;
     newTrack.projLineVertices = projLineVertices;
 
     newTrack.pointCount = static_cast<int>(points.size());
     newTrack.totalDuration = points.back().timeOffset;
+    newTrack.warningSpeedCount = warningSpeedCount;
+    newTrack.abnormalSpeedCount = abnormalSpeedCount;
+    newTrack.maxActualSpeed = maxActualSpeed;
+    newTrack.maxSpeedError = maxSpeedError;
 
     osgEarth::GeoPoint startGeo, endGeo;
     if (startGeo.fromWorld(_mapNode->getMapSRS(), points.front().worldPos)) {
@@ -841,11 +517,16 @@ void MainWindow::on_btnImportData_clicked()
         newTrack.endLat = endGeo.y();
     }
 
-    _allTracks.insert(trackId, newTrack);
-    _currentTrackId = trackId;
+    _trackManager.addTrack(newTrack);
+    qInfo() << "[航迹导入]" << "航迹对象创建完成，航迹ID：" << trackId;
+    qInfo() << "[速度检查]"
+            << QString("导入完成，速度检查结果：异常 %1 个，可疑 %2 个")
+                   .arg(abnormalSpeedCount)
+                   .arg(warningSpeedCount);
+    qInfo() << "[多航迹管理]" << "新航迹导入完成，当前航迹数量：" << _trackManager.trackIds().size();
 
     // =========================
-    // E. 绑定“当前选中轨迹”的主指针
+    // 绑定当前选中航迹的快捷指针
     // =========================
     _planePat = planePat;
     _pathGeom = pathGeom;
@@ -854,58 +535,49 @@ void MainWindow::on_btnImportData_clicked()
     _projLineVertices = projLineVertices;
 
     // =========================
-    // F. UI 更新
+    // 更新 UI 状态
     // =========================
     ui->listWidgetTracks->addItem(trackId);
     ui->listWidgetTracks->setCurrentRow(ui->listWidgetTracks->count() - 1);
 
     ui->btnResetView->setEnabled(true);
     ui->sliderProgress->setEnabled(true);
-    ui->sliderProgress->setRange(0, static_cast<int>(newCb->_totalDuration * 10));
+    ui->sliderProgress->setRange(0, static_cast<int>(newPlaybackController.totalDuration() * SystemConfig::Playback::SliderTimeScale));
     ui->sliderProgress->setValue(0);
 
-    ui->labelState->setText(QString("状态: 已加载轨迹 (%1个点)").arg(points.size()));
+    ui->labelState->setText(QString("状态：已加载轨迹（%1 个点）").arg(points.size()));
     refreshTrackInfoPanel();
 
-    osgEarth::Util::EarthManipulator* manip = dynamic_cast<osgEarth::Util::EarthManipulator*>(
-        _osgWidget->getViewer()->getCameraManipulator());
-    if (manip) {
-        osgEarth::GeoPoint firstPt;
-        if (firstPt.fromWorld(_mapNode->getMapSRS(), points[0].worldPos)) {
-            manip->setViewpoint(osgEarth::Viewpoint("Import", firstPt.x(), firstPt.y(), 0, 0, -45, 20000), 2.0);
-        }
-    }
-}
-//动态刷新航迹
-void MainWindow::updatePathRender(osg::Vec3Array* va) {
-    if (_pathGeom.valid()) {
-        _pathGeom->setVertexArray(va);
-        // 清除旧的指令并添加新的
-        _pathGeom->removePrimitiveSet(0, _pathGeom->getNumPrimitiveSets());
-        _pathGeom->addPrimitiveSet(new osg::DrawArrays(GL_LINE_STRIP, 0, va->size()));
+    focusCurrentAircraft(true);
+    newPlaybackController.setPaused(false);
+    _isPaused = false;
+    ui->btnPlayPause->setText("暂停播放");
+    qInfo() << "[模型回放]" << "开始按时间插值回放";
 
-        _pathGeom->dirtyDisplayList(); // 刷新显示列表
-        _pathGeom->dirtyBound();       // 刷新包围盒
-    }
+    on_checkShowPoints_clicked(ui->checkShowPoints->isChecked());
+    on_checkShowBasePlane_clicked(ui->checkShowBasePlane->isChecked());
 }
-
 void MainWindow::on_btnPlayPause_clicked()
 {
     if (!_planePat.valid()) return;
 
-    auto* cb = dynamic_cast<TimeBasedMoveCallback*>(_planePat->getUpdateCallback());
-    if (cb) {
-        // 1. 切换逻辑状态
-        cb->isPaused = !cb->isPaused;
-        _isPaused = cb->isPaused;
+    TrackPlaybackController playbackController;
+    playbackController.bind(_planePat.get());
+    if (playbackController.hasCallback()) {
+        qInfo() << "[播放控制]" << (playbackController.isPaused() ? "用户点击播放按钮" : "用户点击暂停按钮");
+        // 切换播放状态
+        _isPaused = playbackController.togglePaused();
 
-        // 2. 更新 UI 文字
+        // 更新按钮和状态文字
         if (_isPaused) {
             ui->btnPlayPause->setText("继续播放");
-            ui->labelState->setText("状态: 已暂停");
+            ui->labelState->setText("状态：已暂停");
+            qInfo() << "[播放控制]" << "当前状态：暂停";
         } else {
             ui->btnPlayPause->setText("暂停播放");
-            ui->labelState->setText("状态: 正在回放");
+            ui->labelState->setText("状态：正在回放");
+            qInfo() << "[播放控制]" << "当前状态：播放";
+            qInfo() << "[模型回放]" << "开始按时间插值回放";
         }
     }
 }
@@ -914,12 +586,14 @@ void MainWindow::on_btnPlayPause_clicked()
 void MainWindow::on_comboBox_currentTextChanged(const QString &arg1)
 {
     if (!_planePat.valid()) return;
-    auto* cb = dynamic_cast<TimeBasedMoveCallback*>(_planePat->getUpdateCallback());
-    if (cb) {
+    TrackPlaybackController playbackController;
+    playbackController.bind(_planePat.get());
+    if (playbackController.hasCallback()) {
         double s = QStringView(arg1).left(arg1.indexOf('x')).toDouble();
         if (s > 0) {
-            cb->_timeScale = s;
-            // 这里不需要再 setText 了，uiTimer 下一秒就会自动刷新它
+            playbackController.setTimeScale(s);
+            qInfo() << "[播放控制]" << "回放倍率切换为：" << QString("%1x").arg(s, 0, 'f', 1);
+            // 状态文字由 UI 定时器刷新
         }
     }
 }
@@ -935,17 +609,16 @@ void MainWindow::on_btnPitchUp_clicked()
     if (manip) {
         osgEarth::Viewpoint vp = manip->getViewpoint();
 
-        // 因为 pitch() 返回的是 optional，所以用 -> 来访问内部的 Angle 对象
-        // 同时要检查它是否有值 (isSet)
+        // pitch() 为可选值，读取前需检查有效性
         double currentPitch = 0.0;
         if (vp.pitch().isSet()) {
             currentPitch = vp.pitch()->as(osgEarth::Units::DEGREES);
         }
 
-        // 抬头：角度增加
+        // 增大俯仰角
         vp.pitch() = osgEarth::Angle(currentPitch + 5.0, osgEarth::Units::DEGREES);
 
-        manip->setViewpoint(vp, 0.3); // 调快一点，0.3秒更灵敏
+        manip->setViewpoint(vp, 0.3); // 调快一点，0.3 秒更灵敏
     }
 }
 
@@ -977,25 +650,30 @@ void MainWindow::on_btnPitchDown_clicked()
 
 void MainWindow::on_checkShowProjection_clicked(bool checked)
 {
-    for (auto it = _allTracks.begin(); it != _allTracks.end(); ++it) {
-        if (it.value().projLineGeode.valid()) {
-            it.value().projLineGeode->setNodeMask(checked ? 0xffffffff : 0x0);
+    for (const QString& trackId : _trackManager.trackIds()) {
+        TrackObject* track = _trackManager.track(trackId);
+        if (track && track->projLineGeode.valid()) {
+            track->projLineGeode->setNodeMask(checked ? 0xffffffff : 0x0);
         }
     }
+    qInfo() << "[辅助可视化]" << "投影线显示开关：" << (checked ? "开启" : "关闭");
 }
 
-// 列表切换逻辑
+// 航迹列表切换
 void MainWindow::on_listWidgetTracks_itemClicked(QListWidgetItem *item)
 {
     if (!item) return;
 
     QString trackId = item->text();
-    if (!_allTracks.contains(trackId)) return;
+    qInfo() << "[多航迹管理]" << "用户选择航迹：" << trackId;
+    if (!_trackManager.selectTrack(trackId)) return;
+    qInfo() << "[多航迹管理]" << "当前操作航迹已切换为：" << trackId;
 
-    _currentTrackId = trackId;
-    TrackObject& track = _allTracks[trackId];
+    TrackObject* trackPtr = _trackManager.track(trackId);
+    if (!trackPtr) return;
+    TrackObject& track = *trackPtr;
 
-    // 主指针重新绑定到当前选中的航迹
+    // 重新绑定当前航迹快捷指针
     _planePat = track.planePat;
     _projLineGeode = track.projLineGeode;
     _projLineGeom = track.projLineGeom;
@@ -1004,82 +682,112 @@ void MainWindow::on_listWidgetTracks_itemClicked(QListWidgetItem *item)
     refreshTrackInfoPanel();
 
     if (_planePat.valid()) {
-        auto* cb = dynamic_cast<TimeBasedMoveCallback*>(_planePat->getUpdateCallback());
-        if (cb) {
+        TrackPlaybackController playbackController;
+        playbackController.bind(_planePat.get());
+        if (playbackController.hasCallback()) {
             ui->sliderProgress->blockSignals(true);
-            ui->sliderProgress->setRange(0, static_cast<int>(cb->_totalDuration * 10));
-            ui->sliderProgress->setValue(static_cast<int>(cb->_currentTime * 10));
+            ui->sliderProgress->setRange(0, static_cast<int>(playbackController.totalDuration() * SystemConfig::Playback::SliderTimeScale));
+            ui->sliderProgress->setValue(static_cast<int>(playbackController.currentTime() * SystemConfig::Playback::SliderTimeScale));
             ui->sliderProgress->blockSignals(false);
 
-            _isPaused = cb->isPaused;
+            _isPaused = playbackController.isPaused();
             ui->btnPlayPause->setText(_isPaused ? "继续播放" : "暂停播放");
         }
     }
 
-    // 点击后视角聚焦到当前选中飞机
-    osgEarth::Util::EarthManipulator* manip = dynamic_cast<osgEarth::Util::EarthManipulator*>(
-        _osgWidget->getViewer()->getCameraManipulator());
-
-    if (manip && _planePat.valid() && _mapNode.valid()) {
-        osg::Vec3d worldPos = _planePat->getPosition();
-        osgEarth::GeoPoint geoPos;
-        if (geoPos.fromWorld(_mapNode->getMapSRS(), worldPos)) {
-            double followRange = 3000.0;   //复位后的高度
-
-            osgEarth::Viewpoint vp("Focus", geoPos.x(), geoPos.y(), geoPos.z(), 0, -45, followRange);
-            _isFollowing = false;
-            _resetTimer.start();
-            manip->setViewpoint(vp, 2.0);
-
-            QTimer::singleShot(2100, [this,followRange]() {
-                this->_lastRange = followRange;
-                this->_isFollowing = true;  //(111)
-                ui->labelState->setText("状态: 自动跟随");
-            });
-        }
-    }
+    focusCurrentAircraft(true);
+    qInfo() << "[视角控制]" << "航迹切换完成，镜头定位到航迹：" << trackId;
+    on_checkShowPoints_clicked(ui->checkShowPoints->isChecked());
+    on_checkShowBasePlane_clicked(ui->checkShowBasePlane->isChecked());
 }
 
-// 删除航迹逻辑
+// 删除航迹
 void MainWindow::on_btnDeleteTrack_clicked()
 {
     QListWidgetItem* item = ui->listWidgetTracks->currentItem();
     if (!item) {
+        qWarning() << "[多航迹管理]" << "删除航迹失败：未选择航迹";
         QMessageBox::warning(this, "提示", "请先在列表中选择要删除的航迹！");
         return;
     }
 
     QString trackId = item->text();
+    qInfo() << "[多航迹管理]" << "删除航迹：" << trackId;
 
-    // 1. 从 OSG 场景图中安全移除渲染节点
+    // 从 OSG 场景图中移除渲染节点
     osg::Group* root = _osgWidget->getViewer()->getSceneData()->asGroup();
-    if (root && _allTracks.contains(trackId)) {
-        TrackObject& track = _allTracks[trackId];
-        if (track.planePat.valid()) root->removeChild(track.planePat);
-        if (track.projLineGeode.valid()) root->removeChild(track.projLineGeode);
-        if (track.pathGeode.valid()) root->removeChild(track.pathGeode);
+    TrackObject* track = _trackManager.track(trackId);
+    if (root && track) {
+        if (track->planePat.valid()) root->removeChild(track->planePat);
+        if (track->projLineGeode.valid()) root->removeChild(track->projLineGeode);
+        if (track->pathGeode.valid()) root->removeChild(track->pathGeode);
+        if (track->pointGeode.valid()) root->removeChild(track->pointGeode);
+        if (track->basePlaneGeode.valid()) root->removeChild(track->basePlaneGeode);
     }
 
-    // 2. 从数据结构和 UI 列表中移除
-    _allTracks.remove(trackId);
+    // 从数据结构和 UI 列表中移除
+    bool wasCurrentTrack = (_trackManager.currentTrackId() == trackId);
+    _trackManager.removeTrack(trackId);
     delete item; // 释放 UI item 内存
+    qInfo() << "[多航迹管理]" << "删除完成，剩余航迹数量：" << _trackManager.trackIds().size();
 
-    // 3. 处理善后：如果删除的是当前正在播放的航迹，需要重置状态
-    if (_currentTrackId == trackId) {
-        if (_allTracks.isEmpty()) {
-            // 全部删空了，彻底清空状态
-            _currentTrackId = "";
+    // 删除当前航迹后的状态处理
+    if (wasCurrentTrack) {
+        if (_trackManager.isEmpty()) {
+            // 清空当前航迹状态
             _planePat = nullptr;
+            _pathGeom = nullptr;
             _projLineGeode = nullptr;
+            _projLineGeom = nullptr;
+            _projLineVertices = nullptr;
 
             ui->sliderProgress->setEnabled(false);
             ui->btnResetView->setEnabled(false);
-            ui->labelState->setText("状态: 等待导入数据");
+            ui->labelState->setText("状态：等待导入数据");
         } else {
-            // 还有别的航迹，默认选中剩下的第一个
+            // 选中 UI 列表中的第一条剩余航迹
             ui->listWidgetTracks->setCurrentRow(0);
             on_listWidgetTracks_itemClicked(ui->listWidgetTracks->currentItem());
         }
     }
+}
+
+// 航迹点显隐
+void MainWindow::on_checkShowPoints_clicked(bool checked)
+{
+    // 先隐藏全部航迹点
+    for (const QString& trackId : _trackManager.trackIds()) {
+        TrackObject* track = _trackManager.track(trackId);
+        if (track && track->pointGeode.valid()) {
+            track->pointGeode->setNodeMask(0x0);
+        }
+    }
+
+    // 显示当前航迹点
+    TrackObject* currentTrack = _trackManager.currentTrack();
+    if (checked && currentTrack && currentTrack->pointGeode.valid()) {
+        currentTrack->pointGeode->setNodeMask(0xffffffff);
+    }
+    qInfo() << "[航迹显示]" << "航迹点显示开关：" << (checked ? "开启" : "关闭");
+    qInfo() << "[辅助可视化]" << "航迹点显示开关：" << (checked ? "开启" : "关闭");
+}
+
+// 航迹参考面显隐
+void MainWindow::on_checkShowBasePlane_clicked(bool checked)
+{
+    // 先隐藏全部参考面
+    for (const QString& trackId : _trackManager.trackIds()) {
+        TrackObject* track = _trackManager.track(trackId);
+        if (track && track->basePlaneGeode.valid()) {
+            track->basePlaneGeode->setNodeMask(0x0);
+        }
+    }
+
+    // 显示当前航迹参考面
+    TrackObject* currentTrack = _trackManager.currentTrack();
+    if (checked && currentTrack && currentTrack->basePlaneGeode.valid()) {
+        currentTrack->basePlaneGeode->setNodeMask(0xffffffff);
+    }
+    qInfo() << "[辅助可视化]" << "高度参考面显示开关：" << (checked ? "开启" : "关闭");
 }
 

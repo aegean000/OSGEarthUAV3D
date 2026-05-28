@@ -30,6 +30,13 @@ add_executable(project1
     mainwindow.cpp
     mainwindow.h
     mainwindow.ui
+    refactor_src/TrackLoader.cpp
+    refactor_src/MapSceneManager.cpp
+    refactor_src/TrackNodeBuilder.cpp
+    refactor_src/TrackAnimationCallback.cpp
+    refactor_src/TrackPlaybackController.cpp
+    refactor_src/TrackManager.cpp
+    refactor_src/SystemConfig.h
     QOSGWidget.h QOSGWidget.cpp
 )
 

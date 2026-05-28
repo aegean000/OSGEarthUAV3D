@@ -3,10 +3,12 @@
 #include <QApplication>
 #include <QLocale>
 #include <QTranslator>
+#include <osgEarth/Registry>
 
 int main(int argc, char *argv[])
 {
     QApplication a(argc, argv);
+    osgEarth::initialize();
 
     QTranslator translator;
     const QStringList uiLanguages = QLocale::system().uiLanguages();

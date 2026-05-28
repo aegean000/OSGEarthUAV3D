@@ -52,7 +52,7 @@
        <property name="geometry">
         <rect>
          <x>20</x>
-         <y>570</y>
+         <y>600</y>
          <width>160</width>
          <height>22</height>
         </rect>
@@ -65,7 +65,7 @@
        <property name="geometry">
         <rect>
          <x>20</x>
-         <y>630</y>
+         <y>670</y>
          <width>161</width>
          <height>20</height>
         </rect>
@@ -74,24 +74,11 @@
         <string>显示经纬度</string>
        </property>
       </widget>
-      <widget class="QLabel" name="labelAlt">
-       <property name="geometry">
-        <rect>
-         <x>20</x>
-         <y>660</y>
-         <width>151</width>
-         <height>20</height>
-        </rect>
-       </property>
-       <property name="text">
-        <string>显示高度</string>
-       </property>
-      </widget>
       <widget class="QLabel" name="labelState">
        <property name="geometry">
         <rect>
          <x>20</x>
-         <y>600</y>
+         <y>640</y>
          <width>171</width>
          <height>20</height>
         </rect>
@@ -117,7 +104,7 @@
        <property name="geometry">
         <rect>
          <x>10</x>
-         <y>690</y>
+         <y>700</y>
          <width>93</width>
          <height>28</height>
         </rect>
@@ -130,7 +117,7 @@
        <property name="geometry">
         <rect>
          <x>110</x>
-         <y>690</y>
+         <y>700</y>
          <width>83</width>
          <height>25</height>
         </rect>
@@ -189,7 +176,7 @@
        <property name="geometry">
         <rect>
          <x>10</x>
-         <y>120</y>
+         <y>110</y>
          <width>71</width>
          <height>23</height>
         </rect>
@@ -211,7 +198,7 @@
        <property name="geometry">
         <rect>
          <x>0</x>
-         <y>150</y>
+         <y>180</y>
          <width>191</width>
          <height>171</height>
         </rect>
@@ -220,21 +207,21 @@
       <widget class="QPushButton" name="btnDeleteTrack">
        <property name="geometry">
         <rect>
-         <x>0</x>
-         <y>330</y>
+         <x>10</x>
+         <y>360</y>
          <width>101</width>
          <height>28</height>
         </rect>
        </property>
        <property name="text">
-        <string>删除该航迹线</string>
+        <string>删除该航迹</string>
        </property>
       </widget>
       <widget class="QLabel" name="labelTrackInfo">
        <property name="geometry">
         <rect>
          <x>10</x>
-         <y>370</y>
+         <y>390</y>
          <width>181</width>
          <height>191</height>
         </rect>
@@ -244,6 +231,32 @@
        </property>
        <property name="wordWrap">
         <bool>true</bool>
+       </property>
+      </widget>
+      <widget class="QCheckBox" name="checkShowPoints">
+       <property name="geometry">
+        <rect>
+         <x>10</x>
+         <y>130</y>
+         <width>95</width>
+         <height>23</height>
+        </rect>
+       </property>
+       <property name="text">
+        <string>显示航迹点</string>
+       </property>
+      </widget>
+      <widget class="QCheckBox" name="checkShowBasePlane">
+       <property name="geometry">
+        <rect>
+         <x>10</x>
+         <y>150</y>
+         <width>131</width>
+         <height>23</height>
+        </rect>
+       </property>
+       <property name="text">
+        <string>显示500m参考面</string>
        </property>
       </widget>
      </widget>

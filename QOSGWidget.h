@@ -6,6 +6,7 @@
 #include <osgGA/TrackballManipulator>
 #include <osgViewer/api/Win32/GraphicsWindowWin32>
 
+// Qt OpenGL 控件封装类，负责在界面中嵌入 OSG Viewer。
 class QOSGWidget : public QOpenGLWidget
 {
     Q_OBJECT
@@ -17,7 +18,7 @@ protected:
     virtual void paintGL() override;
     virtual void resizeGL(int w, int h) override;
 
-    // 鼠标事件传递给 OSG
+    // 将 Qt 输入事件转发给 OSG 事件队列。
     virtual void mouseMoveEvent(QMouseEvent* event) override;
     virtual void mousePressEvent(QMouseEvent* event) override;
     virtual void mouseReleaseEvent(QMouseEvent* event) override;
@@ -25,7 +26,7 @@ protected:
 
 private:
     osg::ref_ptr<osgViewer::Viewer> _viewer;
-    osg::ref_ptr<osgViewer::GraphicsWindowEmbedded> _gw; // ✅ 添加这一行
+    osg::ref_ptr<osgViewer::GraphicsWindowEmbedded> _gw;
 };
 
 #endif
